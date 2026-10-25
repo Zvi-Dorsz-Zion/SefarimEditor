@@ -1,0 +1,289 @@
+<Window x:Class="SefarimEditor.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:core="clr-namespace:Sefarim.Core;assembly=Sefarim.Core"
+        Title="עורך הספרייה" Width="1320" Height="840" MinWidth="980" MinHeight="600"
+        WindowStartupLocation="CenterScreen" Style="{StaticResource AppWindow}">
+    <Grid>
+        <DockPanel>
+            <!-- סרגל עליון -->
+            <Border DockPanel.Dock="Top" Background="{StaticResource Surface}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="16,10">
+                <DockPanel LastChildFill="False">
+                    <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
+                        <Image Source="app.ico" Width="28" Height="28" Margin="0,0,10,0"/>
+                        <TextBlock Text="עורך הספרייה" Style="{StaticResource H1}" VerticalAlignment="Center"/>
+                        <TextBlock Text="ספרייה:" Margin="28,0,8,0" VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+                        <ComboBox x:Name="LibraryCombo" Width="230" VerticalAlignment="Center" SelectionChanged="LibraryCombo_SelectionChanged" DisplayMemberPath="Display" Padding="8,5"/>
+                        <Button Content="פתח קובץ אחר…" Margin="10,0,0,0" Click="OpenOther_Click"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" VerticalAlignment="Center">
+                        <Button x:Name="CopyFileButton" Content="📋  העתק את הקובץ ללוח" Click="CopyFile_Click"
+                                ToolTip="מעתיק את קובץ הספרייה (כולל השינויים) ללוח, כדי להדביק אותו בתיקייה אחרת או בכונן נייד"/>
+                        <Button x:Name="TopRestoreButton" Content="↩  החזר למקור" Click="RestoreAll_Click" Margin="0,0,14,0"
+                                ToolTip="מחזיר את כל השינויים, והקובץ חוזר להיות זהה למקור"/>
+                        <Border x:Name="StatusPill" CornerRadius="14" Padding="14,5" Background="{StaticResource SuccessSoft}">
+                            <TextBlock x:Name="StatusText" Text="—" FontWeight="SemiBold" Foreground="{StaticResource Success}"/>
+                        </Border>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+
+            <!-- הודעת מצב (למשל: התוכנה פתוחה, הכרטיס לא מחובר) -->
+            <Border x:Name="Banner" DockPanel.Dock="Top" Visibility="Collapsed" Background="{StaticResource WarnSoft}" BorderBrush="#FCD34D" BorderThickness="0,0,0,1" Padding="16,9">
+                <DockPanel>
+                    <Button x:Name="BannerButton" DockPanel.Dock="Right" Visibility="Collapsed" Click="BannerButton_Click" Margin="8,0,0,0"/>
+                    <TextBlock x:Name="BannerText" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{StaticResource Warn}"/>
+                </DockPanel>
+            </Border>
+
+            <TabControl x:Name="Tabs" Margin="8,4,8,0" SelectionChanged="Tabs_SelectionChanged">
+                <!-- ───────── ספרייה ───────── -->
+                <TabItem Header="📚  ספרייה">
+                    <Grid Margin="0,8,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="300" MinWidth="200"/>
+                            <ColumnDefinition Width="6"/>
+                            <ColumnDefinition Width="*" MinWidth="300"/>
+                            <ColumnDefinition Width="6"/>
+                            <ColumnDefinition Width="400" MinWidth="300"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- עץ קטגוריות -->
+                        <Border Style="{StaticResource Card}" Padding="10">
+                            <DockPanel>
+                                <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
+                                    <TextBox x:Name="SearchBox" TextChanged="SearchBox_TextChanged" Padding="30,6,8,6"/>
+                                    <TextBlock Text="🔍" Margin="10,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False" Foreground="{StaticResource Muted}"/>
+                                    <TextBlock x:Name="SearchHint" Text="חיפוש ספר או מחבר…" Margin="32,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False" Foreground="#94A3B8"/>
+                                </Grid>
+                                <TreeView x:Name="CategoryTree" SelectedItemChanged="CategoryTree_SelectedItemChanged" VirtualizingPanel.IsVirtualizing="True">
+                                    <TreeView.ItemTemplate>
+                                        <HierarchicalDataTemplate DataType="{x:Type core:CategoryNode}" ItemsSource="{Binding Children}">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="📁" Margin="0,0,6,0" Opacity="0.8"/>
+                                                <TextBlock Text="{Binding Title}"/>
+                                                <TextBlock Text="{Binding TotalBooks, StringFormat=' ({0})'}" Foreground="{StaticResource Muted}"/>
+                                            </StackPanel>
+                                        </HierarchicalDataTemplate>
+                                    </TreeView.ItemTemplate>
+                                </TreeView>
+                            </DockPanel>
+                        </Border>
+                        <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" Background="Transparent"/>
+
+                        <!-- רשימת ספרים -->
+                        <Border Grid.Column="2" Style="{StaticResource Card}" Padding="0">
+                            <DockPanel>
+                                <Border DockPanel.Dock="Top" Padding="14,12" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1">
+                                    <StackPanel>
+                                        <TextBlock x:Name="ListTitle" Text="בחר קטגוריה" Style="{StaticResource H2}" Margin="0" TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock x:Name="ListSubtitle" Style="{StaticResource MutedText}" FontSize="12.5" Margin="0,2,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border DockPanel.Dock="Bottom" Padding="12,10" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0">
+                                    <DockPanel>
+                                        <TextBlock x:Name="SelectionInfo" DockPanel.Dock="Right" VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button x:Name="DeleteBooksButton" Style="{StaticResource DangerButton}" Content="🗑  מחק ספרים נבחרים" Click="DeleteBooks_Click" IsEnabled="False"/>
+                                            <Button Content="בחר הכול" Click="SelectAll_Click"/>
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Border>
+                                <ListView x:Name="BookList" SelectionMode="Extended" SelectionChanged="BookList_SelectionChanged"
+                                          VirtualizingPanel.IsVirtualizing="True" ScrollViewer.HorizontalScrollBarVisibility="Disabled" Padding="6,4">
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate>
+                                            <DockPanel Margin="6,2">
+                                                <TextBlock DockPanel.Dock="Right" Text="{Binding TotalLines, StringFormat='{}{0:N0} שורות'}"
+                                                           Foreground="{StaticResource Muted}" FontSize="12.5" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                                    <TextBlock Text="{Binding Subtitle}" Foreground="{StaticResource Muted}" FontSize="12.5" TextTrimming="CharacterEllipsis"/>
+                                                </StackPanel>
+                                            </DockPanel>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                            </DockPanel>
+                        </Border>
+                        <GridSplitter Grid.Column="3" Width="6" HorizontalAlignment="Stretch" Background="Transparent"/>
+
+                        <!-- פרטים -->
+                        <Border Grid.Column="4" Style="{StaticResource Card}" Padding="0">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <StackPanel Margin="16">
+                                    <TextBlock x:Name="DetailsEmpty" Text="בחר ספר או קטגוריה כדי לראות ולערוך פרטים." Style="{StaticResource MutedText}" Margin="0,20"/>
+
+                                    <!-- כרטיס ספר -->
+                                    <StackPanel x:Name="BookPanel" Visibility="Collapsed">
+                                        <TextBlock Text="פרטי הספר" Style="{StaticResource H2}"/>
+                                        <TextBlock x:Name="BookMeta" Style="{StaticResource MutedText}" FontSize="12.5"/>
+
+                                        <TextBlock Text="שם הספר" Style="{StaticResource Label}"/>
+                                        <TextBox x:Name="BookTitle" TextChanged="BookField_Changed"/>
+
+                                        <TextBlock Text="מחברים (מופרדים בפסיק)" Style="{StaticResource Label}"/>
+                                        <TextBox x:Name="BookAuthors" TextChanged="BookField_Changed"/>
+
+                                        <TextBlock Text="תיאור קצר" Style="{StaticResource Label}"/>
+                                        <TextBox x:Name="BookShortDesc" TextChanged="BookField_Changed" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="60" MaxHeight="160" VerticalScrollBarVisibility="Auto"/>
+
+                                        <StackPanel x:Name="LongDescPanel">
+                                            <TextBlock Text="תיאור מלא" Style="{StaticResource Label}"/>
+                                            <TextBox x:Name="BookLongDesc" TextChanged="BookField_Changed" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="60" MaxHeight="200" VerticalScrollBarVisibility="Auto"/>
+                                        </StackPanel>
+
+                                        <TextBlock Text="קטגוריה" Style="{StaticResource Label}"/>
+                                        <DockPanel>
+                                            <Button DockPanel.Dock="Right" Content="העבר…" Click="MoveBook_Click" Margin="8,0,0,0"/>
+                                            <TextBox x:Name="BookCategory" IsReadOnly="True"/>
+                                        </DockPanel>
+
+                                        <TextBlock Text="מיקום בסדר (מספר קטן = מוקדם יותר)" Style="{StaticResource Label}"/>
+                                        <TextBox x:Name="BookOrder" TextChanged="BookField_Changed" Width="100" HorizontalAlignment="Left"/>
+
+                                        <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                                            <Button x:Name="SaveBookButton" Style="{StaticResource PrimaryButton}" Content="שמור שינויים" Click="SaveBook_Click" IsEnabled="False"/>
+                                            <Button x:Name="RevertBookButton" Content="בטל" Click="RevertBook_Click" IsEnabled="False"/>
+                                            <Button Style="{StaticResource DangerButton}" Content="מחק ספר" Click="DeleteOneBook_Click"/>
+                                        </StackPanel>
+
+                                        <Expander Header="תצוגה מקדימה של הטקסט" Margin="0,18,0,0" Expanded="Preview_Expanded" x:Name="PreviewExpander">
+                                            <TextBox x:Name="PreviewText" IsReadOnly="True" TextWrapping="Wrap" Margin="0,8,0,0" MaxHeight="360" VerticalScrollBarVisibility="Auto" FontSize="15" FontFamily="David, Segoe UI"/>
+                                        </Expander>
+                                    </StackPanel>
+
+                                    <!-- כרטיס קטגוריה -->
+                                    <StackPanel x:Name="CategoryPanel" Visibility="Collapsed">
+                                        <TextBlock Text="פרטי הקטגוריה" Style="{StaticResource H2}"/>
+                                        <TextBlock x:Name="CategoryMeta" Style="{StaticResource MutedText}" FontSize="12.5"/>
+
+                                        <TextBlock Text="שם הקטגוריה" Style="{StaticResource Label}"/>
+                                        <TextBox x:Name="CategoryTitle" TextChanged="CategoryField_Changed"/>
+
+                                        <TextBlock Text="מיקום בסדר" Style="{StaticResource Label}"/>
+                                        <TextBox x:Name="CategoryOrder" TextChanged="CategoryField_Changed" Width="100" HorizontalAlignment="Left"/>
+
+                                        <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                                            <Button x:Name="SaveCategoryButton" Style="{StaticResource PrimaryButton}" Content="שמור שינויים" Click="SaveCategory_Click" IsEnabled="False"/>
+                                            <Button x:Name="DeleteCategoryButton" Style="{StaticResource DangerButton}" Content="מחק קטגוריה" Click="DeleteCategory_Click"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Border>
+                    </Grid>
+                </TabItem>
+
+                <!-- ───────── שינויים ועדכונים ───────── -->
+                <TabItem Header="🔄  שינויים ועדכונים">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel Margin="4,12" MaxWidth="980" HorizontalAlignment="Left">
+                            <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                                <StackPanel>
+                                    <TextBlock x:Name="StateTitle" Style="{StaticResource H2}"/>
+                                    <TextBlock x:Name="StateBody" Style="{StaticResource MutedText}" FontSize="14" LineHeight="22"/>
+                                    <WrapPanel Margin="0,14,0,0">
+                                        <Button x:Name="RestoreAllButton" Style="{StaticResource PrimaryButton}" Content="↩  החזר הכול למקור (לפני עדכון)" Click="RestoreAll_Click" Margin="0,0,8,8"/>
+                                        <Button x:Name="ReapplyButton" Style="{StaticResource PrimaryButton}" Content="↪  החל את השינויים שוב" Click="Reapply_Click" Margin="0,0,8,8"/>
+                                        <Button x:Name="UndoLastButton" Content="בטל את השינוי האחרון" Click="UndoLast_Click" Margin="0,0,8,8"/>
+                                        <Button x:Name="CompactButton" Content="🧹  פנה מקום בדיסק" Click="Compact_Click" Margin="0,0,8,8"/>
+                                    </WrapPanel>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                                <StackPanel>
+                                    <TextBlock Text="השינויים שבוצעו" Style="{StaticResource H2}"/>
+                                    <TextBlock x:Name="OpsEmpty" Text="עדיין לא בוצעו שינויים." Style="{StaticResource MutedText}"/>
+                                    <ItemsControl x:Name="OpsList">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="0,8">
+                                                    <DockPanel>
+                                                        <TextBlock DockPanel.Dock="Right" Text="{Binding StateText}" Foreground="{Binding StateBrush}" FontWeight="SemiBold" Margin="12,0,0,0"/>
+                                                        <StackPanel>
+                                                            <TextBlock Text="{Binding Summary}" FontWeight="SemiBold"/>
+                                                            <TextBlock Text="{Binding Details}" Foreground="{StaticResource Muted}" FontSize="12.5"/>
+                                                        </StackPanel>
+                                                    </DockPanel>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource Card}">
+                                <StackPanel>
+                                    <TextBlock Text="הקובץ והדיסק" Style="{StaticResource H2}"/>
+                                    <TextBlock x:Name="DiskInfo" Style="{StaticResource MutedText}" FontSize="14" LineHeight="22"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- ───────── הגדרות ───────── -->
+                <TabItem Header="⚙  הגדרות">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel Margin="4,12" MaxWidth="980" HorizontalAlignment="Left">
+                            <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                                <StackPanel>
+                                    <TextBlock Text="תיקיית גיבוי" Style="{StaticResource H2}"/>
+                                    <TextBlock Style="{StaticResource MutedText}" LineHeight="21"
+                                               Text="כל מה שנמחק או משתנה נשמר כאן, כדי שאפשר יהיה להחזיר את הקובץ למקור לפני עדכון. כדי לחסוך מקום במחשב, מומלץ לבחור כרטיס זיכרון או כונן חיצוני. הכרטיס נדרש רק כשמבצעים שינויים ובזמן עדכון."/>
+                                    <DockPanel Margin="0,12,0,0">
+                                        <Button DockPanel.Dock="Right" Content="בחר תיקייה…" Click="ChooseBackup_Click" Margin="8,0,0,0"/>
+                                        <TextBox x:Name="BackupPath" IsReadOnly="True" FlowDirection="LeftToRight" TextAlignment="Right"/>
+                                    </DockPanel>
+                                    <TextBlock x:Name="BackupState" Margin="0,8,0,0"/>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                                <StackPanel>
+                                    <TextBlock Text="תהליך רקע" Style="{StaticResource H2}"/>
+                                    <TextBlock Style="{StaticResource MutedText}" LineHeight="21"
+                                               Text="תהליך קטן ליד השעון שבודק מדי פעם אם יצאה גרסת ספרייה חדשה. כשיש עדכון, הוא מחזיר את הקובץ למקור כשהתוכנה סגורה, ואחרי העדכון מחיל את השינויים שוב. הוא כמעט לא צורך משאבים, ואפשר תמיד לדחות עדכון."/>
+                                    <CheckBox x:Name="StartWithWindows" Content="הפעל את תהליך הרקע עם הפעלת Windows" Margin="0,12,0,4" Click="StartWithWindows_Click"/>
+                                    <CheckBox x:Name="WatchThisLibrary" Content="עקוב אחרי עדכונים של הספרייה הזו" Click="WatchThisLibrary_Click"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                        <TextBlock Text="בדוק עדכונים כל" VerticalAlignment="Center"/>
+                                        <ComboBox x:Name="CheckHours" Width="80" Margin="8,0" SelectionChanged="CheckHours_SelectionChanged"/>
+                                        <TextBlock Text="שעות" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                        <Button x:Name="TrayButton" Content="הפעל את תהליך הרקע עכשיו" Click="StartTray_Click"/>
+                                        <TextBlock x:Name="TrayState" VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource Card}">
+                                <StackPanel>
+                                    <TextBlock Text="אודות" Style="{StaticResource H2}"/>
+                                    <TextBlock x:Name="AboutText" Style="{StaticResource MutedText}" LineHeight="21"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+            </TabControl>
+        </DockPanel>
+
+        <!-- שכבת המתנה -->
+        <Grid x:Name="BusyOverlay" Visibility="Collapsed" Background="#99F4F6FA">
+            <Border Style="{StaticResource Card}" Width="440" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="24">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="24" ShadowDepth="4" Opacity="0.18"/>
+                </Border.Effect>
+                <StackPanel>
+                    <TextBlock x:Name="BusyTitle" Style="{StaticResource H2}" Text="עובד…"/>
+                    <ProgressBar IsIndeterminate="True" Height="6" Margin="0,8,0,12" Foreground="{StaticResource Primary}" Background="#E2E8F0" BorderThickness="0"/>
+                    <TextBlock x:Name="BusyText" Style="{StaticResource MutedText}"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>
