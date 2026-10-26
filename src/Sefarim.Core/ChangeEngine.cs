@@ -94,6 +94,28 @@ namespace Sefarim.Core
             _temps.Clear();
         }
 
+        /// <summary>
+        /// השאילתה שמחזירה את ערכי עמודות היעד (RefColumns) של השורות שנבחרו למחיקה בטבלת האב.
+        /// כשעמודות היעד הן המפתח של האב, הן נלקחות ישר מה-sel; אחרת דרך חיבור לטבלה עצמה.
+        /// </summary>
+        private string ParentTuples(ForeignKeyInfo fk)
+        {
+            var p = S[fk.RefTable];
+            var cols = fk.RefColumns;
+            var isKey = cols.Count == p.Key.Count && cols.All(c => p.Key.Contains(c, StringComparer.OrdinalIgnoreCase));
+            return isKey
+                ? $"SELECT {Sql.List(cols)} FROM {SelName(p.Name)}"
+                : $"SELECT {Sql.List(cols, "m")} FROM {SelName(p.Name)} AS s JOIN {MainT(p)} AS m ON {KeyJoin(p, "m", "s")}";
+        }
+
+        /// <summary>תנאי ששורה בטבלת הבן (בכינוי alias, או בשמה כשאין) מפנה לשורה שנמחקת.</summary>
+        private string RefersToDeleted(ForeignKeyInfo fk, string alias, string singleSource = null)
+        {
+            var prefix = alias == null ? "" : alias + ".";
+            if (!fk.IsComposite) return $"{prefix}{Q(fk.Column)} IN ({singleSource ?? ParentTuples(fk)})";
+            return $"({string.Join(",", fk.Columns.Select(c => prefix + Q(c)))}) IN ({ParentTuples(fk)})";
+        }
+
         // ───────────────────────── תכנון מחיקה ─────────────────────────
 
         private sealed class Sets
@@ -130,6 +152,7 @@ namespace Sefarim.Core
             // מקור המפתחות של טבלת האב: ה-sel עצמו כשהקשר הוא למפתח שלה, אחרת סט עזר של העמודה.
             string ParentSource(ForeignKeyInfo fk)
             {
+                if (fk.IsComposite) return ParentTuples(fk);
                 var p = S[fk.RefTable];
                 if (p.Key.Count == 1 && p.Key[0].Equals(fk.RefColumn, StringComparison.OrdinalIgnoreCase))
                     return $"SELECT {Q(p.Key[0])} FROM {SelName(p.Name)}";
@@ -171,7 +194,7 @@ namespace Sefarim.Core
                         EnsureSel(child);
                         progress?.Report($"מחשב מה יימחק ({child.Name})…");
                         var n = _db.Exec($"INSERT OR IGNORE INTO {SelName(child.Name)}({KeyCols(child)}) " +
-                                         $"SELECT {KeyCols(child)} FROM {MainT(child)} WHERE {Q(fk.Column)} IN ({ParentSource(fk)})");
+                                         $"SELECT {KeyCols(child)} FROM {MainT(child)} WHERE {RefersToDeleted(fk, null, fk.IsComposite ? null : ParentSource(fk))}");
                         if (n > 0)
                         {
                             sets.Version[child.Name]++;
@@ -188,7 +211,7 @@ namespace Sefarim.Core
                     var notDeleted = sets.Version.ContainsKey(child.Name)
                         ? $" AND NOT EXISTS (SELECT 1 FROM {SelName(child.Name)} AS s WHERE {KeyJoin(child, "s", "m")})"
                         : "";
-                    var where = $"m.{Q(fk.Column)} IN ({ParentSource(fk)}){notDeleted}";
+                    var where = RefersToDeleted(fk, "m", fk.IsComposite ? null : ParentSource(fk)) + notDeleted;
                     if (fk.OnDelete == DeleteAction.SetNull)
                     {
                         if (!_temps.Contains(NulName(child.Name))) CreateKeyTemp(NulName(child.Name), child);
@@ -268,8 +291,8 @@ namespace Sefarim.Core
                     foreach (var fk in kv.Value)
                     {
                         progress?.Report($"מעדכן את {t.Name}…");
-                        _db.Exec($"UPDATE {MainT(t)} SET {Q(fk.Column)} = NULL WHERE {KeyIn(t, NulName(t.Name))} " +
-                                 $"AND {Q(fk.Column)} IN (SELECT {Q(S[fk.RefTable].Key[0])} FROM {SelName(fk.RefTable)})");
+                        var set = string.Join(",", fk.Columns.Select(c => $"{Q(c)} = NULL"));
+                        _db.Exec($"UPDATE {MainT(t)} SET {set} WHERE {KeyIn(t, NulName(t.Name))} AND {RefersToDeleted(fk, MainT(t))}");
                     }
                 }
                 foreach (var t in tables.Where(t => _temps.Contains(SelName(t.Name))))

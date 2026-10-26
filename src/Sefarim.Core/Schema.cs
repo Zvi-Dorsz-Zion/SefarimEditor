@@ -22,10 +22,21 @@ namespace Sefarim.Core
     public sealed class ForeignKeyInfo
     {
         public string Table { get; set; }
-        public string Column { get; set; }
         public string RefTable { get; set; }
-        public string RefColumn { get; set; }
+
+        /// <summary>עמודות הקשר בטבלת הבן, וממולן (באותו סדר) העמודות בטבלת האב.</summary>
+        public List<string> Columns { get; set; } = new List<string>();
+        public List<string> RefColumns { get; set; } = new List<string>();
+
         public DeleteAction OnDelete { get; set; }
+
+        /// <summary>קשר על כמה עמודות יחד (למשל lineId + noteIndex בסכמה 7 של אוצריא).</summary>
+        public bool IsComposite => Columns.Count > 1;
+
+        /// <summary>העמודה היחידה, בקשר של עמודה אחת.</summary>
+        public string Column => Columns[0];
+
+        public string RefColumn => RefColumns[0];
 
         /// <summary>true כשהקשר לא מוצהר בסכמה ונגזר מעמודה בשם bookId.</summary>
         public bool Inferred { get; set; }
@@ -129,24 +140,28 @@ namespace Sefarim.Core
                 }
                 foreach (var g in groups.Values)
                 {
-                    if (g.Count != 1)
-                        throw new NotSupportedException($"מפתח זר מרובה עמודות בטבלה {t.Name} אינו נתמך.");
-                    var (from, refTable, to, onDelete) = g[0];
+                    var refTable = g[0].table;
                     var parent = info[refTable];
-                    if (to == null)
-                    {
-                        if (parent == null || parent.Key.Count != 1)
-                            throw new NotSupportedException($"לא ניתן לזהות את יעד הקשר {t.Name}.{from}.");
-                        to = parent.Key[0];
-                    }
-                    info.ForeignKeys.Add(new ForeignKeyInfo
+                    var fk = new ForeignKeyInfo
                     {
                         Table = t.Name,
-                        Column = from,
                         RefTable = parent?.Name ?? refTable,
-                        RefColumn = to,
-                        OnDelete = ParseAction(onDelete),
-                    });
+                        OnDelete = ParseAction(g[0].onDelete),
+                    };
+                    for (var i = 0; i < g.Count; i++)
+                    {
+                        var to = g[i].to;
+                        if (to == null)
+                        {
+                            // קשר בלי עמודות יעד מפנה למפתח הראשי של טבלת האב, לפי הסדר.
+                            if (parent == null || parent.Key.Count != g.Count)
+                                throw new NotSupportedException($"לא ניתן לזהות את יעד הקשר {t.Name}.{g[i].from}.");
+                            to = parent.Key[i];
+                        }
+                        fk.Columns.Add(g[i].from);
+                        fk.RefColumns.Add(to);
+                    }
+                    info.ForeignKeys.Add(fk);
                 }
             }
 
@@ -158,13 +173,13 @@ namespace Sefarim.Core
                     if (t.Name.Equals("book", StringComparison.OrdinalIgnoreCase)) continue;
                     if (!t.HasColumn("bookId")) continue;
                     var col = t.Columns.First(c => c.Name.Equals("bookId", StringComparison.OrdinalIgnoreCase)).Name;
-                    if (info.ForeignKeys.Any(f => f.Table == t.Name && f.Column == col)) continue;
+                    if (info.ForeignKeys.Any(f => f.Table == t.Name && f.Columns.Contains(col))) continue;
                     info.ForeignKeys.Add(new ForeignKeyInfo
                     {
                         Table = t.Name,
-                        Column = col,
+                        Columns = { col },
                         RefTable = info["book"].Name,
-                        RefColumn = "id",
+                        RefColumns = { "id" },
                         OnDelete = DeleteAction.Cascade,
                         Inferred = true,
                     });
