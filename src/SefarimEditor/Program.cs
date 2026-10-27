@@ -67,6 +67,7 @@ namespace SefarimEditor
                 ShowActivated = false,
                 ShowInTaskbar = false,
             };
+            window.SnapshotScrollToEnd = args.Contains("--scroll-end");
             long.TryParse(Arg(args, "--category"), out var cat);
             long.TryParse(Arg(args, "--book"), out var book);
             int.TryParse(Arg(args, "--tab"), out var tab);

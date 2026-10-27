@@ -22,6 +22,12 @@ namespace SefarimEditor
             public string Display { get; set; }
         }
 
+        private sealed class CheckModeItem
+        {
+            public CheckMode Mode { get; set; }
+            public string Text { get; set; }
+        }
+
         private sealed class OpRow
         {
             public string Summary { get; set; }
@@ -62,6 +68,15 @@ namespace SefarimEditor
             };
             foreach (var h in new[] { 1, 3, 6, 12, 24 }) CheckHours.Items.Add(h);
             CheckHours.SelectedItem = _settings.CheckHours;
+            var modes = new List<CheckModeItem>
+            {
+                new CheckModeItem { Mode = CheckMode.LikeOtzaria, Text = "כמו שמוגדר באוצריא" },
+                new CheckModeItem { Mode = CheckMode.Always, Text = "תמיד" },
+                new CheckModeItem { Mode = CheckMode.Never, Text = "אף פעם (רק כשאלחץ \"בדוק\")" },
+            };
+            CheckModeCombo.ItemsSource = modes;
+            CheckModeCombo.SelectedItem = modes.First(m => m.Mode == _settings.CheckMode);
+            FillCheckModeState();
             StartWithWindows.IsChecked = Autostart.IsEnabled();
             RichText.Set(AboutText, $"עורך הספרייה, גרסה {typeof(MainWindow).Assembly.GetName().Version.ToString(3)}\n" +
                                     $"ההגדרות נשמרות ב: {Ltr(AppSettings.Folder)}");
@@ -78,6 +93,9 @@ namespace SefarimEditor
             Closed += (s, e) => _ro?.Dispose();
             _runningTimer.Start();
         }
+
+        /// <summary>מצב בדיקה: לגלול את הלשונית עד הסוף לפני הצילום.</summary>
+        internal bool SnapshotScrollToEnd { get; set; }
 
         /// <summary>מצב בדיקה: מכין מצב תצוגה, מצייר את החלון לקובץ PNG ונסגר.</summary>
         internal async Task Snapshot(string path, int tab, long? category, long? book, string search)
@@ -105,6 +123,11 @@ namespace SefarimEditor
                 }
             }
             await Task.Delay(1200);
+            if (SnapshotScrollToEnd && (Tabs.SelectedItem as TabItem)?.Content is ScrollViewer sv)
+            {
+                sv.ScrollToEnd();
+                await Task.Delay(400);
+            }
             var root = (FrameworkElement)Content;
             var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap((int)root.ActualWidth, (int)root.ActualHeight, 96, 96, PixelFormats.Pbgra32);
             rtb.Render(root);
@@ -156,6 +179,109 @@ namespace SefarimEditor
             await Reload("טוען את הספרייה…");
             WatchThisLibrary.IsChecked = _cfg.Watch;
             BackupPath.Text = _cfg.BackupRoot ?? "";
+            FillMethod();
+        }
+
+        // ───────────────────────── שיטת העדכון ─────────────────────────
+
+        private void FillMethod()
+        {
+            var otzaria = _choice?.Kind == LibraryKind.Otzaria;
+            UpdatesCard.Visibility = otzaria ? Visibility.Visible : Visibility.Collapsed;
+            var self = otzaria && _cfg.Method == UpdateMethod.SelfUpdate;
+            BackupExplain.Text = self
+                ? "בשיטה ב' הגיבוי זמני: הוא שומר את מה שנמחק רק עד שמפנים אותו (או עד העדכון הבא), כדי שאפשר יהיה לבטל טעות. " +
+                  "לכן אין צורך בכרטיס זיכרון, וברירת המחדל היא תיקייה במחשב. שינויים קטנים (כמו שינוי שם) נשמרים כאן תמיד."
+                : "כל מה שנמחק או משתנה נשמר כאן, כדי שאפשר יהיה להחזיר את הקובץ למקור לפני עדכון. כדי לחסוך מקום במחשב, מומלץ לבחור כרטיס זיכרון או כונן חיצוני. הכרטיס נדרש רק כשמבצעים שינויים ובזמן עדכון.";
+            TrayExplain.Text = self
+                ? "תהליך קטן ליד השעון שבודק מדי פעם אם יצאה גרסת ספרייה חדשה. כשיש עדכון והתוכנה סגורה, הוא שואל אם לעדכן, ורק באישורך מוריד ומחיל את העדכון ומוחק שוב את מה שמחקת. הוא כמעט לא צורך משאבים, ואפשר תמיד לדחות עדכון."
+                : "תהליך קטן ליד השעון שבודק מדי פעם אם יצאה גרסת ספרייה חדשה. כשיש עדכון, הוא מחזיר את הקובץ למקור כשהתוכנה סגורה, ואחרי העדכון מחיל את השינויים שוב. הוא כמעט לא צורך משאבים, ואפשר תמיד לדחות עדכון.";
+            if (!otzaria) return;
+            MethodFull.IsChecked = !self;
+            MethodSelf.IsChecked = self;
+            ReleasePanel.IsEnabled = self;
+            ReleasePanel.Opacity = self ? 1 : 0.55;
+            ReleaseManual.IsChecked = !_cfg.ReleaseBackupAfterUpdate;
+            ReleaseAuto.IsChecked = _cfg.ReleaseBackupAfterUpdate;
+            MethodState.Text = self
+                ? "✔ פועל בשיטה ב': כשתצא גרסה חדשה, עורך הספרייה ישאל אם לעדכן, ויעדכן בעצמו."
+                : "✔ פועל בשיטה א': לפני עדכון הקובץ יוחזר למקור (באישורך), ואוצריא תעדכן.";
+            MethodState.Foreground = (Brush)FindResource("Success");
+        }
+
+        private void Method_Click(object sender, RoutedEventArgs e)
+        {
+            if (_cfg == null || _choice?.Kind != LibraryKind.Otzaria) return;
+            var wantSelf = MethodSelf.IsChecked == true;
+            if (wantSelf == (_cfg.Method == UpdateMethod.SelfUpdate)) return;
+            if (wantSelf)
+            {
+                if (_status == LibraryStatus.WaitingReapply)
+                {
+                    Dialogs.Info(this, "יש שינויים שממתינים להחלה", "לפני מעבר לשיטה ב' צריך להחיל שוב את השינויים שהוחזרו (בלשונית \"שינויים ועדכונים\").");
+                    FillMethod();
+                    return;
+                }
+                if (!Dialogs.Ask(this, "לעבור לעדכון עצמי?",
+                        "מעכשיו, כשתצא גרסת ספרייה חדשה, עורך הספרייה ישאל אם לעדכן, ויוריד ויחיל את העדכון בעצמו – בלי להחזיר את הקובץ למקור.\n\n" +
+                        "אחרי עדכון כזה, המחיקות הופכות לקבועות: אי אפשר לבטל מחיקה של ספר בודד, ולהחזרת הכול צריך הורדה מלאה של הספרייה דרך אוצריא.\n\n" +
+                        "חשוב: כשאוצריא מציעה בעצמה עדכון ספרייה בזמן שהקובץ ערוך, כדאי לסרב ולתת לעורך הספרייה לעדכן.",
+                        "עבור לשיטה ב'"))
+                {
+                    FillMethod();
+                    return;
+                }
+                _cfg.Method = UpdateMethod.SelfUpdate;
+            }
+            else
+            {
+                if (_ops.Any(o => o.State == OpState.Permanent))
+                {
+                    Dialogs.Info(this, "אי אפשר לחזור לשיטה א' כרגע",
+                        "חלק מהמחיקות כבר קבועות (בלי גיבוי), ולכן אי אפשר להחזיר את הקובץ למקור לפני עדכון. " +
+                        "כדי לחזור לשיטה א' צריך הורדה מלאה של הספרייה דרך אוצריא; אחריה השינויים יוחלו שוב, הפעם עם גיבוי.");
+                    FillMethod();
+                    return;
+                }
+                _cfg.Method = UpdateMethod.FullBackup;
+            }
+            SaveSettings();
+            FillMethod();
+            RefreshStatus();
+        }
+
+        private void Release_Click(object sender, RoutedEventArgs e)
+        {
+            if (_cfg == null) return;
+            _cfg.ReleaseBackupAfterUpdate = ReleaseAuto.IsChecked == true;
+            SaveSettings();
+        }
+
+        private void CheckMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!(CheckModeCombo.SelectedItem is CheckModeItem item) || item.Mode == _settings.CheckMode) return;
+            _settings.CheckMode = item.Mode;
+            SaveSettings();
+            FillCheckModeState();
+        }
+
+        private void FillCheckModeState()
+        {
+            if (_settings.CheckMode != CheckMode.LikeOtzaria)
+            {
+                CheckModeState.Text = _settings.CheckMode == CheckMode.Never
+                    ? "תהליך הרקע לא יבדוק עדכונים. אפשר לבדוק ידנית בלשונית \"שינויים ועדכונים\"."
+                    : "";
+                return;
+            }
+            var st = OtzariaApp.ReadUpdateSettings();
+            CheckModeState.Text = st == null
+                ? "לא ניתן לקרוא את ההגדרות של אוצריא, ולכן התוכנה תבדוק עדכונים כרגיל."
+                : st.ChecksUpdates
+                    ? "באוצריא מופעלים עדכונים, ולכן התוכנה תבדוק עדכונים."
+                    : st.OfflineMode
+                        ? "אוצריא במצב לא מקוון, ולכן התוכנה לא תבדוק עדכונים."
+                        : "באוצריא כבויים עדכוני הספרים, ולכן התוכנה לא תבדוק עדכונים.";
         }
 
         /// <summary>טוען מחדש את הקטלוג ואת רשימת השינויים, ושומר על הבחירה הנוכחית אם אפשר.</summary>
@@ -248,7 +374,7 @@ namespace SefarimEditor
 
             if (running && _choice.Kind != LibraryKind.Other)
                 ShowBanner($"{name} פתוחה כרגע. אפשר לעיין ולחפש, אבל כדי לשמור שינויים יש לסגור אותה.", "בדוק שוב", RefreshStatus);
-            else if (string.IsNullOrEmpty(_cfg.BackupRoot))
+            else if (string.IsNullOrEmpty(_cfg.BackupRoot) && !_cfg.SelfUpdating)
                 ShowBanner("עוד לא נבחרה תיקיית גיבוי. היא נדרשת לפני השינוי הראשון (מומלץ כרטיס זיכרון או כונן חיצוני).", "בחר תיקייה…", () => ChooseBackup_Click(null, null));
             else if (root == null)
                 ShowBanner($"תיקיית הגיבוי לא זמינה ({Ltr(_cfg.BackupRoot)}). אם היא בכרטיס זיכרון, חבר אותו.", "בדוק שוב", RefreshStatus);
@@ -299,8 +425,11 @@ namespace SefarimEditor
                     StateBody.Text = _choice.Kind == LibraryKind.Zayit
                         ? "זית מורידה את כל הספרייה מחדש בכל עדכון, ולכן אין צורך להכין את הקובץ לפני עדכון. " +
                           "אחרי עדכון כזה, תהליך הרקע יחיל את השינויים שלך שוב (או שתלחץ כאן \"החל את השינויים שוב\")."
-                        : $"כשתצא גרסת ספרייה חדשה, צריך להחזיר את הקובץ למקור לפני העדכון, כדי ש{name} תוריד רק את ההפרשים. " +
-                          "תהליך הרקע עושה זאת לבד כשהתוכנה סגורה. אפשר גם ללחוץ כאן על \"החזר הכול למקור\", לעדכן, ואחר כך ללחוץ \"החל את השינויים שוב\".";
+                        : _cfg.SelfUpdating
+                            ? "שיטה ב' (עדכון עצמי): כשתצא גרסת ספרייה חדשה, עורך הספרייה ישאל אם לעדכן, ויוריד ויחיל את העדכון בעצמו, " +
+                              $"בלי להחזיר את הקובץ למקור. אפשר גם ללחוץ כאן \"בדוק עדכון ועדכן\". אם {name} מציעה בעצמה עדכון ספרייה – כדאי לסרב."
+                            : $"כשתצא גרסת ספרייה חדשה, צריך להחזיר את הקובץ למקור לפני העדכון, כדי ש{name} תוריד רק את ההפרשים. " +
+                              "תהליך הרקע עושה זאת לבד כשהתוכנה סגורה. אפשר גם ללחוץ כאן על \"החזר הכול למקור\", לעדכן, ואחר כך ללחוץ \"החל את השינויים שוב\".";
                     break;
                 default:
                     StateTitle.Text = "ממתין להחלה מחדש";
@@ -310,12 +439,21 @@ namespace SefarimEditor
             }
 
             var hasApplied = _ops.Any(o => o.State == OpState.Applied && o.DbVersion == version);
-            RestoreAllButton.IsEnabled = _storeAvailable && hasApplied;
+            var hasPermanent = _ops.Any(o => o.State == OpState.Permanent);
+            var last = _ops.Where(o => o.State == OpState.Applied || o.State == OpState.Permanent).OrderByDescending(o => o.Id).FirstOrDefault();
+            RestoreAllButton.IsEnabled = _storeAvailable && hasApplied && !hasPermanent;
             TopRestoreButton.IsEnabled = RestoreAllButton.IsEnabled;
-            RestoreAllButton.Content = _choice.Kind == LibraryKind.Otzaria ? "↩  החזר הכול למקור (לפני עדכון)" : "↩  החזר הכול למקור";
-            UndoLastButton.IsEnabled = _storeAvailable && hasApplied;
+            RestoreAllButton.Content = _choice.Kind == LibraryKind.Otzaria && !_cfg.SelfUpdating ? "↩  החזר הכול למקור (לפני עדכון)" : "↩  החזר הכול למקור";
+            RestoreAllButton.Visibility = _cfg.SelfUpdating && hasPermanent ? Visibility.Collapsed : Visibility.Visible;
+            UndoLastButton.IsEnabled = _storeAvailable && last?.State == OpState.Applied && last.DbVersion == version;
             ReapplyButton.IsEnabled = _storeAvailable && _status == LibraryStatus.WaitingReapply;
             CompactButton.IsEnabled = _choice != null;
+            SelfUpdateButton.Visibility = _cfg.SelfUpdating ? Visibility.Visible : Visibility.Collapsed;
+            SelfUpdateButton.IsEnabled = _storeAvailable && _status == LibraryStatus.Edited;
+            var undoableDeletes = _ops.Count(o => o.State == OpState.Applied &&
+                                                  (o.Intent.Kind == OpIntent.DeleteBooks || o.Intent.Kind == OpIntent.DeleteCategories));
+            ReleaseBackupButton.Visibility = _cfg.SelfUpdating ? Visibility.Visible : Visibility.Collapsed;
+            ReleaseBackupButton.IsEnabled = _storeAvailable && undoableDeletes > 0;
 
             OpsList.ItemsSource = (_storeAvailable ? _ops.Select(ToRow) : _cfg.IntentsMirror.Select(i => new OpRow
             {
@@ -328,12 +466,15 @@ namespace SefarimEditor
 
             OpRow ToRow(AppliedOp o)
             {
-                var applied = o.State == OpState.Applied && o.DbVersion == version;
+                var permanent = o.State == OpState.Permanent && o.DbVersion == version;
+                var applied = (o.State == OpState.Applied || permanent) && o.DbVersion == version;
                 return new OpRow
                 {
                     Summary = o.Intent.Summary,
-                    Details = $"{o.Created:dd/MM/yyyy HH:mm} · {o.Rows:N0} שורות בגיבוי" + (o.DbVersion.HasValue ? $" · גרסת ספרייה {o.DbVersion}" : ""),
-                    StateText = applied ? "מוחל" : "ממתין להחלה",
+                    Details = $"{o.Created:dd/MM/yyyy HH:mm} · " +
+                              (o.State == OpState.Permanent ? "בלי גיבוי (אי אפשר לבטל)" : $"{o.Rows:N0} שורות בגיבוי") +
+                              (o.DbVersion.HasValue ? $" · גרסת ספרייה {o.DbVersion}" : ""),
+                    StateText = permanent ? "מוחל (קבוע)" : applied ? "מוחל" : "ממתין להחלה",
                     StateBrush = (Brush)FindResource(applied ? "Primary" : "Warn"),
                 };
             }
@@ -686,7 +827,10 @@ namespace SefarimEditor
             var other = plan.TotalRows - books - cats - plan.Count("line") - plan.Count("link");
             if (other > 0) lines.Add($"• {other:N0} רשומות נלוות (תוכן עניינים, אינדקסים ועוד)");
             var text = "יימחקו מהקובץ:\n" + string.Join("\n", lines) +
-                       $"\n\nהכול נשמר קודם בתיקיית הגיבוי ({Ltr(root)}), ואפשר להחזיר בכל עת.";
+                       (_cfg.SelfUpdating
+                           ? $"\n\nהכול נשמר קודם בגיבוי ({Ltr(root)}), ואפשר לבטל את המחיקה עד שהגיבוי יפונה" +
+                             (_cfg.ReleaseBackupAfterUpdate ? " (אוטומטית, בעדכון הספרייה הבא)." : " (בלחיצה על \"פנה את גיבוי המחיקות\", או בעדכון הספרייה).")
+                           : $"\n\nהכול נשמר קודם בתיקיית הגיבוי ({Ltr(root)}), ואפשר להחזיר בכל עת.");
             if (_choice.Kind == LibraryKind.Zayit)
                 text += "\n\nשים לב: בזית הספרים יוסרו גם מעץ הספרים, אבל ייתכן שימשיכו להופיע בתוצאות החיפוש, כי לזית יש אינדקס חיפוש נפרד.";
             if (_choice.Kind == LibraryKind.Otzaria)
@@ -709,7 +853,8 @@ namespace SefarimEditor
         private async void Reapply_Click(object sender, RoutedEventArgs e)
         {
             ReapplyResult result = null;
-            var ok = await RunWrite("מחיל את השינויים שוב…", (s, p) => result = s.ReapplyRestored(p));
+            var permanent = _cfg.SelfUpdating;
+            var ok = await RunWrite("מחיל את השינויים שוב…", (s, p) => result = s.ReapplyRestored(p, permanentDeletes: permanent));
             if (!ok || result == null) return;
             var text = $"הוחלו {result.Applied} שינויים.";
             if (result.Notes.Count > 0) text += "\n\n" + string.Join("\n", result.Notes);
@@ -720,10 +865,96 @@ namespace SefarimEditor
 
         private async void UndoLast_Click(object sender, RoutedEventArgs e)
         {
-            var last = _ops.Where(o => o.State == OpState.Applied).OrderByDescending(o => o.Id).FirstOrDefault();
+            var last = _ops.Where(o => o.State == OpState.Applied || o.State == OpState.Permanent).OrderByDescending(o => o.Id).FirstOrDefault();
             if (last == null) return;
+            if (last.State == OpState.Permanent)
+            {
+                Dialogs.Info(this, "אי אפשר לבטל", $"השינוי האחרון (\"{last.Intent.Summary}\") נעשה בלי גיבוי, ולכן אי אפשר לבטל אותו.");
+                return;
+            }
             if (!Dialogs.Ask(this, "לבטל את השינוי האחרון?", last.Intent.Summary, "בטל את השינוי")) return;
             await RunWrite("מבטל…", (s, p) => s.UndoLast(p));
+        }
+
+        // ───────────────────────── עדכון עצמי ─────────────────────────
+
+        private async void SelfUpdate_Click(object sender, RoutedEventArgs e)
+        {
+            if (_choice?.Kind != LibraryKind.Otzaria || !_cfg.SelfUpdating || !EnsureCanWrite()) return;
+            var path = _choice.Path;
+            SelfUpdateCheck check;
+            ShowBusy("בודק אם יש עדכון…", "פונה ל-GitHub");
+            try
+            {
+                check = await Task.Run(() => SelfUpdater.Check(_settings, path));
+                SaveSettings();
+            }
+            catch (Exception ex)
+            {
+                HideBusy();
+                Dialogs.Error(this, "הבדיקה נכשלה", ex.Message + "\n\n(אין חיבור לאינטרנט?)");
+                return;
+            }
+            HideBusy();
+
+            if (check.Plan.UpToDate)
+            {
+                Dialogs.Info(this, "הספרייה מעודכנת", $"גרסת הספרייה שלך ({check.LocalVersion}) היא האחרונה.");
+                return;
+            }
+            if (!check.HasUpdate)
+            {
+                Dialogs.Info(this, "אי אפשר לעדכן כאן", $"יש גרסת ספרייה חדשה ({check.Plan.LatestVersion}; אצלך {check.LocalVersion}), אבל:\n\n{check.Plan.Reason}");
+                return;
+            }
+            if (!ConfirmSelfUpdate(check)) return;
+
+            SelfUpdateOutcome outcome = null;
+            var ok = await RunWrite("מעדכן את הספרייה…", (s, p) => outcome = SelfUpdater.Run(s, check.Plan, p));
+            if (!ok || outcome == null) return;
+            _suggestCompact = true;
+            var text = $"הספרייה עודכנה מגרסה {outcome.FromVersion} לגרסה {outcome.ToVersion}, והשינויים שלך הוחלו שוב.";
+            if (outcome.OrphansRemoved > 0) text += $"\n\nנוקו {outcome.OrphansRemoved:N0} קישורים שהעדכון הוסיף לספרים שמחקת.";
+            if (outcome.Notes.Count > 0) text += "\n\n" + string.Join("\n", outcome.Notes);
+            text += outcome.IndexRefreshRequested
+                ? "\n\nבפתיחה הבאה, אוצריא תרענן את החיפוש של הספרים שהשתנו."
+                : "\n\nכדי שהחיפוש באוצריא יכלול את השינויים, אפשר לבנות בה מחדש את אינדקס החיפוש.";
+            Dialogs.Info(this, "העדכון הושלם", text);
+        }
+
+        /// <summary>השאלה לפני עדכון עצמי – תמיד נשאלת, לעולם לא מעדכנים בלי אישור.</summary>
+        private bool ConfirmSelfUpdate(SelfUpdateCheck check)
+        {
+            var plan = check.Plan;
+            var steps = string.Join(", ", plan.Steps.Select(s => $"מ-{s.Manifest.FromVersion} ל-{s.Manifest.ToVersion}"));
+            var text = $"יש עדכון ספרייה: מגרסה {check.LocalVersion} לגרסה {plan.LatestVersion}" +
+                       (plan.Steps.Count > 1 ? $" (ב-{plan.Steps.Count} שלבים: {steps})" : "") +
+                       $".\nגודל ההורדה: {Ltr(SelfUpdater.Size(plan.DownloadBytes))}. ההחלה לוקחת בדרך כלל כמה דקות, ובזמן הזה אין לפתוח את אוצריא.";
+            if (plan.ChangesSchema)
+                text += $"\n\nהעדכון משנה את מבנה הקובץ (לגרסה {plan.Steps.Last().Manifest.ToSchemaVersion}). גרסת אוצריא המותקנת אצלך ({Ltr(check.OtzariaTag ?? "?")}) תומכת בו.";
+            var undoable = _ops.Count(o => o.State == OpState.Applied &&
+                                           (o.Intent.Kind == OpIntent.DeleteBooks || o.Intent.Kind == OpIntent.DeleteCategories));
+            if (undoable > 0)
+                text += _cfg.ReleaseBackupAfterUpdate
+                    ? $"\n\nהגיבוי של {undoable} מחיקות יפונה בעדכון, ואחריו אי אפשר יהיה לבטל אותן."
+                    : $"\n\nשים לב: {undoable} מחיקות עדיין ניתנות לביטול. העדכון יהפוך אותן לקבועות (הגיבוי שלהן שייך לגרסה הישנה). " +
+                      "אם אתה רוצה לבטל מחיקה, עשה זאת לפני העדכון.";
+            text += "\n\nאם משהו נכשל באמצע, הקובץ נשאר כמו שהיה.";
+            return Dialogs.Ask(this, "לעדכן את הספרייה?", text, "עדכן עכשיו", "לא עכשיו");
+        }
+
+        private async void ReleaseBackup_Click(object sender, RoutedEventArgs e)
+        {
+            var undoable = _ops.Count(o => o.State == OpState.Applied &&
+                                           (o.Intent.Kind == OpIntent.DeleteBooks || o.Intent.Kind == OpIntent.DeleteCategories));
+            if (undoable == 0) return;
+            if (!Dialogs.Ask(this, "לפנות את גיבוי המחיקות?",
+                    $"הספרים של {undoable} מחיקות יימחקו גם מהגיבוי, והמקום יתפנה. אחרי זה אי אפשר לבטל את המחיקות האלה " +
+                    "(להחזרה צריך הורדה מלאה של הספרייה). השינויים ימשיכו להיות מוחלים בקובץ, גם אחרי עדכונים.",
+                    "פנה את הגיבוי", "ביטול", danger: true)) return;
+            var count = 0;
+            var ok = await RunWrite("מפנה את הגיבוי…", (s, p) => count = s.ReleaseDeleteBackups(p));
+            if (ok) Dialogs.Info(this, "הגיבוי פונה", $"פונה הגיבוי של {count} מחיקות.");
         }
 
         private async void Compact_Click(object sender, RoutedEventArgs e)
@@ -790,6 +1021,15 @@ namespace SefarimEditor
                 return false;
             }
             if (!needsBackup) return true;
+            if (string.IsNullOrEmpty(_cfg.BackupRoot) && _cfg.SelfUpdating)
+            {
+                // בשיטה ב' הגיבוי זמני ואינו מחייב כרטיס: ברירת המחדל היא תיקייה במחשב.
+                var local = Path.Combine(AppSettings.Folder, "גיבוי");
+                Directory.CreateDirectory(Path.Combine(local, BackupStore.FolderName));
+                _cfg.BackupRoot = local;
+                SaveSettings();
+                BackupPath.Text = local;
+            }
             if (string.IsNullOrEmpty(_cfg.BackupRoot))
             {
                 Dialogs.Info(this, "צריך לבחור תיקיית גיבוי",
@@ -955,7 +1195,8 @@ namespace SefarimEditor
                     Dialogs.Error(this, "אי אפשר לכתוב לתיקייה הזו", ex.Message);
                     return;
                 }
-                if (_choice != null && string.Equals(Path.GetPathRoot(chosen), Path.GetPathRoot(_choice.Path), StringComparison.OrdinalIgnoreCase) &&
+                if (_choice != null && _cfg != null && !_cfg.SelfUpdating &&
+                    string.Equals(Path.GetPathRoot(chosen), Path.GetPathRoot(_choice.Path), StringComparison.OrdinalIgnoreCase) &&
                     !Dialogs.Ask(this, "התיקייה באותו כונן של הספרייה",
                         "גיבוי באותו כונן לא יחסוך מקום: כל מה שיימחק מהספרייה יישמר באותו כונן. להמשיך בכל זאת?", "המשך"))
                     return;

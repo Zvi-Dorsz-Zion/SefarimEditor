@@ -8,10 +8,44 @@ using System.Text.Json.Serialization;
 
 namespace Sefarim.Core
 {
+    /// <summary>איך מתמודדים עם עדכוני ספרייה של אוצריא כשהקובץ ערוך.</summary>
+    public enum UpdateMethod
+    {
+        /// <summary>אפשרות א': גיבוי מלא; לפני עדכון הקובץ מוחזר למקור ואוצריא מעדכנת בעצמה.</summary>
+        FullBackup,
+
+        /// <summary>אפשרות ב': התוכנה מורידה ומחילה בעצמה את העדכון החלקי, ומוחקת שוב את מה שנמחק.</summary>
+        SelfUpdate,
+    }
+
+    /// <summary>מתי לבדוק אם יצאה גרסת ספרייה חדשה.</summary>
+    public enum CheckMode
+    {
+        /// <summary>רק אם באוצריא מופעלים עדכונים ולא מופעל מצב לא מקוון.</summary>
+        LikeOtzaria,
+        Always,
+
+        /// <summary>רק בלחיצה על "בדוק עדכון".</summary>
+        Never,
+    }
+
     /// <summary>הגדרות לספרייה אחת (אוצריא, זית או קובץ אחר).</summary>
     public sealed class LibraryConfig
     {
         public LibraryKind Kind { get; set; }
+
+        /// <summary>שיטת העדכון (רלוונטי לאוצריא בלבד). ברירת המחדל – כמו בגרסה 1.</summary>
+        public UpdateMethod Method { get; set; } = UpdateMethod.FullBackup;
+
+        /// <summary>
+        /// במצב עדכון עצמי: true = הגיבוי של המחיקות מתפנה אוטומטית אחרי העדכון, בלי לשאול.
+        /// false = התוכנה שואלת לפני עדכון שיהפוך מחיקות לקבועות, ואפשר לפנות ידנית.
+        /// </summary>
+        public bool ReleaseBackupAfterUpdate { get; set; }
+
+        /// <summary>במצב עדכון עצמי – האם המחיקות נעשות בלי גיבוי שורות (אחרי עדכון או שחרור גיבוי).</summary>
+        [JsonIgnore]
+        public bool SelfUpdating => Kind == LibraryKind.Otzaria && Method == UpdateMethod.SelfUpdate;
 
         /// <summary>null = איתור אוטומטי לפי ההגדרות של התוכנה עצמה.</summary>
         public string DbPath { get; set; }
@@ -64,6 +98,27 @@ namespace Sefarim.Core
 
         /// <summary>כבר שאלנו אם להפעיל את תהליך הרקע (שואלים פעם אחת, אחרי השינוי הראשון).</summary>
         public bool AskedAboutTray { get; set; }
+
+        public CheckMode CheckMode { get; set; } = CheckMode.LikeOtzaria;
+
+        /// <summary>
+        /// האם לבדוק עדכונים עכשיו לפי ההגדרה. "כמו באוצריא" קורא את ההגדרות שלה (לקריאה בלבד);
+        /// אם אי אפשר לקרוא אותן – בודקים, כי בדיקה לעולם לא מעדכנת בלי לשאול.
+        /// </summary>
+        public bool ShouldCheckUpdates()
+        {
+            switch (CheckMode)
+            {
+                case CheckMode.Never: return false;
+                case CheckMode.Always: return true;
+                default: return OtzariaApp.ReadUpdateSettings()?.ChecksUpdates ?? true;
+            }
+        }
+
+        /// <summary>תגית הגרסה של אוצריא המותקנת והסכמה שהיא קוראת, לפי הבירור האחרון (כדי לא לפנות לרשת בכל פעם).</summary>
+        public string OtzariaTagChecked { get; set; }
+
+        public int? OtzariaReadableSchema { get; set; }
 
         /// <summary>תיקיית ההגדרות. SEFARIM_SETTINGS_DIR מחליף אותה (לבדיקות בלבד).</summary>
         public static string Folder =>

@@ -133,30 +133,62 @@ namespace Sefarim.Core
         }
 
         private SqliteTransaction _tx;
+        private int _depth;
 
-        /// <summary>פותח טרנזקציה (BEGIN IMMEDIATE). כל הפקודות עד הסגירה רצות בתוכה.</summary>
+        /// <summary>
+        /// פותח טרנזקציה (BEGIN IMMEDIATE). כל הפקודות עד הסגירה רצות בתוכה.
+        /// בתוך טרנזקציה פתוחה נפתחת נקודת שמירה (SAVEPOINT): הסגירה שלה רק משחררת אותה,
+        /// והכול נכתב בפועל רק כשהטרנזקציה החיצונית נסגרת. כך עדכון ספרייה והחלה מחדש
+        /// של השינויים נעשים כפעולה אחת.
+        /// </summary>
         public Transaction Begin()
         {
-            if (_tx != null) throw new InvalidOperationException("כבר קיימת טרנזקציה פתוחה.");
-            _tx = Connection.BeginTransaction();
-            return new Transaction(this);
+            if (_tx == null)
+            {
+                _tx = Connection.BeginTransaction();
+                return new Transaction(this, null);
+            }
+            var name = "sefarim_sp" + (++_depth);
+            _tx.Save(name);
+            return new Transaction(this, name);
         }
+
+        public bool InTransaction => _tx != null;
 
         public sealed class Transaction : IDisposable
         {
             private readonly SeforimDb _owner;
+            private readonly string _savepoint;
             private bool _done;
+            private bool _disposed;
 
-            internal Transaction(SeforimDb owner) => _owner = owner;
+            internal Transaction(SeforimDb owner, string savepoint)
+            {
+                _owner = owner;
+                _savepoint = savepoint;
+            }
 
             public void Commit()
             {
-                _owner._tx.Commit();
+                if (_savepoint == null) _owner._tx.Commit();
+                else _owner._tx.Release(_savepoint);
                 _done = true;
             }
 
             public void Dispose()
             {
+                if (_disposed) return;
+                _disposed = true;
+                if (_savepoint != null)
+                {
+                    if (!_done)
+                    {
+                        _owner._tx.Rollback(_savepoint);
+                        _owner._tx.Release(_savepoint);
+                    }
+                    _owner._depth--;
+                    return;
+                }
                 if (!_done)
                 {
                     try { _owner._tx.Rollback(); }
@@ -164,7 +196,16 @@ namespace Sefarim.Core
                 }
                 _owner._tx.Dispose();
                 _owner._tx = null;
+                _owner._depth = 0;
             }
+        }
+
+        /// <summary>אחרי שינוי מבנה (עדכון ספרייה): קוראים מחדש את מבנה הטבלאות ואת מילון הדחיסה.</summary>
+        public void InvalidateCaches()
+        {
+            _schema = null;
+            _zstd?.Dispose();
+            _zstd = null;
         }
 
         public SqliteCommand Command(string sql, params (string name, object value)[] args)

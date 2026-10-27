@@ -245,7 +245,11 @@ namespace Sefarim.Core
 
         // ───────────────────────── ביצוע מחיקה ─────────────────────────
 
-        public AppliedOp ExecuteDelete(DeletePlan plan, IProgress<string> progress = null)
+        /// <param name="keepBackup">
+        /// false = מחיקה קבועה (מצב "עדכון עצמי"): השורות לא נשמרות בגיבוי ואי אפשר להחזיר אותן;
+        /// נשמר רק מה המשתמש ביקש, כדי להחיל שוב אחרי עדכון. ברירת המחדל – גיבוי מלא, כמו תמיד.
+        /// </param>
+        public AppliedOp ExecuteDelete(DeletePlan plan, IProgress<string> progress = null, bool keepBackup = true)
         {
             if (plan.Token != _planToken) throw new InvalidOperationException("התכנון אינו עדכני. יש לתכנן מחדש.");
             if (plan.Blockers.Count > 0) throw new InvalidOperationException("לא ניתן למחוק: " + string.Join("; ", plan.Blockers));
@@ -253,6 +257,21 @@ namespace Sefarim.Core
 
             var tables = plan.Tables.Select(t => S[t.Table]).ToList();
             long opId;
+
+            if (!keepBackup)
+            {
+                using (var tx = _db.Begin())
+                {
+                    opId = _store.InsertOp(plan.Intent, LibraryVersion);
+                    _store.UpdateOp(opId, rows: plan.TotalRows, tables: tables.Select(t => t.Name).ToList());
+                    ApplyDelete(plan, tables, progress);
+                    _store.UpdateOp(opId, OpState.Permanent);
+                    tx.Commit();
+                }
+                DropTemps();
+                _planToken++;
+                return _store.LoadOps().First(o => o.Id == opId);
+            }
 
             // שלב א: גיבוי לשורות המקוריות במאגר. הספרייה עוד לא נגעה.
             using (var tx = _db.Begin())
@@ -285,27 +304,45 @@ namespace Sefarim.Core
             // שלב ב: השינוי עצמו בספרייה.
             using (var tx = _db.Begin())
             {
-                foreach (var kv in plan.Nullify)
-                {
-                    var t = S[kv.Key];
-                    foreach (var fk in kv.Value)
-                    {
-                        progress?.Report($"מעדכן את {t.Name}…");
-                        var set = string.Join(",", fk.Columns.Select(c => $"{Q(c)} = NULL"));
-                        _db.Exec($"UPDATE {MainT(t)} SET {set} WHERE {KeyIn(t, NulName(t.Name))} AND {RefersToDeleted(fk, MainT(t))}");
-                    }
-                }
-                foreach (var t in tables.Where(t => _temps.Contains(SelName(t.Name))))
-                {
-                    progress?.Report($"מוחק מ-{t.Name}…");
-                    _db.Exec($"DELETE FROM {MainT(t)} WHERE {KeyIn(t, SelName(t.Name))}");
-                }
+                ApplyDelete(plan, tables, progress);
                 _store.UpdateOp(opId, OpState.Applied);
                 tx.Commit();
             }
             RecordAfter(opId, tables);
             DropTemps();
             _planToken++;
+            return _store.LoadOps().First(o => o.Id == opId);
+        }
+
+        private void ApplyDelete(DeletePlan plan, List<TableInfo> tables, IProgress<string> progress)
+        {
+            foreach (var kv in plan.Nullify)
+            {
+                var t = S[kv.Key];
+                foreach (var fk in kv.Value)
+                {
+                    progress?.Report($"מעדכן את {t.Name}…");
+                    var set = string.Join(",", fk.Columns.Select(c => $"{Q(c)} = NULL"));
+                    _db.Exec($"UPDATE {MainT(t)} SET {set} WHERE {KeyIn(t, NulName(t.Name))} AND {RefersToDeleted(fk, MainT(t))}");
+                }
+            }
+            foreach (var t in tables.Where(t => _temps.Contains(SelName(t.Name))))
+            {
+                progress?.Report($"מוחק מ-{t.Name}…");
+                _db.Exec($"DELETE FROM {MainT(t)} WHERE {KeyIn(t, SelName(t.Name))}");
+            }
+        }
+
+        /// <summary>רושם פעולה קבועה שאין לה כרגע מה למחוק (הספר כבר לא בקובץ), כדי שהבקשה תישמר לעדכונים הבאים.</summary>
+        public AppliedOp RecordPermanent(OpIntent intent)
+        {
+            long opId;
+            using (var tx = _db.Begin())
+            {
+                opId = _store.InsertOp(intent, LibraryVersion);
+                _store.UpdateOp(opId, OpState.Permanent, rows: 0, tables: new List<string>());
+                tx.Commit();
+            }
             return _store.LoadOps().First(o => o.Id == opId);
         }
 
@@ -476,6 +513,8 @@ namespace Sefarim.Core
         public void Restore(AppliedOp op, IProgress<string> progress = null)
         {
             if (op.State == OpState.Restored) return;
+            if (op.State == OpState.Permanent)
+                throw new InvalidOperationException($"\"{op.Intent.Summary}\" נמחק בלי גיבוי, ולכן אי אפשר להחזיר אותו. להחזרה צריך הורדה מלאה של הספרייה.");
             using (var tx = _db.Begin())
             {
                 RestoreRows(op, progress);

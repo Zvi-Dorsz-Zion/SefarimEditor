@@ -186,6 +186,10 @@
                                     <WrapPanel Margin="0,14,0,0">
                                         <Button x:Name="RestoreAllButton" Style="{StaticResource PrimaryButton}" Content="↩  החזר הכול למקור (לפני עדכון)" Click="RestoreAll_Click" Margin="0,0,8,8"/>
                                         <Button x:Name="ReapplyButton" Style="{StaticResource PrimaryButton}" Content="↪  החל את השינויים שוב" Click="Reapply_Click" Margin="0,0,8,8"/>
+                                        <Button x:Name="SelfUpdateButton" Style="{StaticResource PrimaryButton}" Content="⬇  בדוק עדכון ועדכן" Click="SelfUpdate_Click" Margin="0,0,8,8"
+                                                ToolTip="בודק אם יצאה גרסת ספרייה חדשה, ושואל לפני שהוא מעדכן"/>
+                                        <Button x:Name="ReleaseBackupButton" Content="🧹  פנה את גיבוי המחיקות" Click="ReleaseBackup_Click" Margin="0,0,8,8"
+                                                ToolTip="מוחק מהגיבוי את הספרים שנמחקו, כדי לפנות מקום. אחרי זה אי אפשר לבטל את המחיקות"/>
                                         <Button x:Name="UndoLastButton" Content="בטל את השינוי האחרון" Click="UndoLast_Click" Margin="0,0,8,8"/>
                                         <Button x:Name="CompactButton" Content="🧹  פנה מקום בדיסק" Click="Compact_Click" Margin="0,0,8,8"/>
                                     </WrapPanel>
@@ -231,7 +235,7 @@
                             <Border Style="{StaticResource Card}" Margin="0,0,0,12">
                                 <StackPanel>
                                     <TextBlock Text="תיקיית גיבוי" Style="{StaticResource H2}"/>
-                                    <TextBlock Style="{StaticResource MutedText}" LineHeight="21"
+                                    <TextBlock x:Name="BackupExplain" Style="{StaticResource MutedText}" LineHeight="21"
                                                Text="כל מה שנמחק או משתנה נשמר כאן, כדי שאפשר יהיה להחזיר את הקובץ למקור לפני עדכון. כדי לחסוך מקום במחשב, מומלץ לבחור כרטיס זיכרון או כונן חיצוני. הכרטיס נדרש רק כשמבצעים שינויים ובזמן עדכון."/>
                                     <DockPanel Margin="0,12,0,0">
                                         <Button DockPanel.Dock="Right" Content="בחר תיקייה…" Click="ChooseBackup_Click" Margin="8,0,0,0"/>
@@ -241,13 +245,49 @@
                                 </StackPanel>
                             </Border>
 
+                            <Border x:Name="UpdatesCard" Style="{StaticResource Card}" Margin="0,0,0,12">
+                                <StackPanel>
+                                    <TextBlock Text="עדכוני ספרייה של אוצריא" Style="{StaticResource H2}"/>
+                                    <TextBlock Style="{StaticResource MutedText}" LineHeight="21"
+                                               Text="אוצריא מעדכנת את הספרייה בהפרשים בלבד, אבל רק כשהקובץ זהה למקור. כשיש בקובץ שינויים שלך, צריך לבחור איך להתמודד עם עדכון:"/>
+
+                                    <RadioButton x:Name="MethodFull" GroupName="Method" Margin="0,12,0,2" Click="Method_Click" FontWeight="SemiBold"
+                                                 Content="שיטה א': גיבוי מלא, ואוצריא מעדכנת"/>
+                                    <TextBlock Style="{StaticResource MutedText}" LineHeight="20" Margin="24,0,0,0"
+                                               Text="כל מה שנמחק נשמר בתיקיית הגיבוי. לפני עדכון הקובץ מוחזר למקור, אוצריא מעדכנת בעצמה, ואחר כך השינויים מוחלים שוב. אפשר לבטל כל שינוי בכל עת. החיסרון: הגיבוי תופס מקום כמו כל מה שנמחק – ולכן כדאי לשים אותו בכרטיס זיכרון."/>
+
+                                    <RadioButton x:Name="MethodSelf" GroupName="Method" Margin="0,12,0,2" Click="Method_Click" FontWeight="SemiBold"
+                                                 Content="שיטה ב': עדכון עצמי (חוסך הכי הרבה מקום)"/>
+                                    <TextBlock Style="{StaticResource MutedText}" LineHeight="20" Margin="24,0,0,0"
+                                               Text="עורך הספרייה מוריד בעצמו את עדכון ההפרשים של אוצריא, מחיל אותו על הקובץ שלך ומוחק שוב את מה שמחקת. לא צריך לשמור את מה שנמחק ולא צריך כרטיס זיכרון. לפני כל עדכון התוכנה שואלת אותך. החיסרון: אחרי עדכון אי אפשר לבטל מחיקה של ספר בודד (להחזרה צריך הורדה מלאה של הספרייה)."/>
+
+                                    <StackPanel x:Name="ReleasePanel" Margin="24,10,0,0">
+                                        <TextBlock Text="מה לעשות עם הגיבוי של ספרים שמחקת:" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                                        <RadioButton x:Name="ReleaseManual" GroupName="Release" Margin="0,4,0,2" Click="Release_Click"
+                                                     Content="אני אפנה אותו בעצמי"/>
+                                        <TextBlock Style="{StaticResource MutedText}" LineHeight="20" Margin="24,0,0,0"
+                                                   Text="אפשר לבטל מחיקה עד שלוחצים &quot;פנה את גיבוי המחיקות&quot;. המקום בדיסק מתפנה רק אחרי הלחיצה. לפני עדכון התוכנה תשאל, כי העדכון הופך את המחיקות לקבועות."/>
+                                        <RadioButton x:Name="ReleaseAuto" GroupName="Release" Margin="0,8,0,2" Click="Release_Click"
+                                                     Content="פנה אותו אוטומטית בעדכון"/>
+                                        <TextBlock Style="{StaticResource MutedText}" LineHeight="20" Margin="24,0,0,0"
+                                                   Text="חוסך מקום בלי לזכור. אחרי העדכון הבא כבר אי אפשר לבטל מחיקה של ספר בודד."/>
+                                    </StackPanel>
+                                    <TextBlock x:Name="MethodState" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Border>
+
                             <Border Style="{StaticResource Card}" Margin="0,0,0,12">
                                 <StackPanel>
                                     <TextBlock Text="תהליך רקע" Style="{StaticResource H2}"/>
-                                    <TextBlock Style="{StaticResource MutedText}" LineHeight="21"
+                                    <TextBlock x:Name="TrayExplain" Style="{StaticResource MutedText}" LineHeight="21"
                                                Text="תהליך קטן ליד השעון שבודק מדי פעם אם יצאה גרסת ספרייה חדשה. כשיש עדכון, הוא מחזיר את הקובץ למקור כשהתוכנה סגורה, ואחרי העדכון מחיל את השינויים שוב. הוא כמעט לא צורך משאבים, ואפשר תמיד לדחות עדכון."/>
                                     <CheckBox x:Name="StartWithWindows" Content="הפעל את תהליך הרקע עם הפעלת Windows" Margin="0,12,0,4" Click="StartWithWindows_Click"/>
                                     <CheckBox x:Name="WatchThisLibrary" Content="עקוב אחרי עדכונים של הספרייה הזו" Click="WatchThisLibrary_Click"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                        <TextBlock Text="בדיקת עדכונים:" VerticalAlignment="Center"/>
+                                        <ComboBox x:Name="CheckModeCombo" Width="260" Margin="8,0" SelectionChanged="CheckMode_SelectionChanged" DisplayMemberPath="Text"/>
+                                    </StackPanel>
+                                    <TextBlock x:Name="CheckModeState" Style="{StaticResource MutedText}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                     <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                         <TextBlock Text="בדוק עדכונים כל" VerticalAlignment="Center"/>
                                         <ComboBox x:Name="CheckHours" Width="80" Margin="8,0" SelectionChanged="CheckHours_SelectionChanged"/>

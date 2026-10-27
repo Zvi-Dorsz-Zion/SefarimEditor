@@ -17,6 +17,12 @@ namespace Sefarim.Core
         WaitingReapply,
     }
 
+    public sealed class SelfUpdateResult
+    {
+        public PatchApplyResult Patch { get; set; }
+        public ReapplyResult Reapply { get; set; }
+    }
+
     public sealed class ReapplyResult
     {
         public int Applied { get; set; }
@@ -47,7 +53,7 @@ namespace Sefarim.Core
         }
 
         /// <summary>גרסת הספרייה כפי שהתוכנה עצמה מזהה אותה.</summary>
-        public long? Version { get; }
+        public long? Version { get; private set; }
 
         /// <summary>תיקיית הגיבוי (רק בפתיחה לכתיבה).</summary>
         public string BackupRoot { get; private set; }
@@ -167,12 +173,13 @@ namespace Sefarim.Core
         private int ReconcileReplacedFile()
         {
             var version = Version;
-            var stale = Ops().Where(o => o.State == OpState.Applied && o.DbVersion != version).ToList();
+            var stale = Ops().Where(o => (o.State == OpState.Applied || o.State == OpState.Permanent) && o.DbVersion != version).ToList();
             var replaced = 0;
             foreach (var op in stale)
             {
                 // רק מספר הגרסה השתנה, והשינוי עדיין בקובץ: מעדכנים את הגרסה ושומרים על הגיבוי.
-                var still = Engine.StillApplied(op);
+                // מחיקה קבועה אי אפשר לבדוק; גרסה שהשתנתה בלי התוכנה פירושה שאוצריא הורידה קובץ חדש.
+                var still = op.State == OpState.Applied && Engine.StillApplied(op);
                 using (var tx = Db.Begin())
                 {
                     if (still) Store.SetOpVersion(op.Id, version);
@@ -196,7 +203,8 @@ namespace Sefarim.Core
         {
             var list = ops.ToList();
             // פעולה "מוחלת" בגרסה אחרת פירושה שהקובץ הוחלף, והשינויים כבר לא בו.
-            if (list.Any(o => (o.State == OpState.Applied || o.State == OpState.Pending) && o.DbVersion == currentVersion))
+            if (list.Any(o => (o.State == OpState.Applied || o.State == OpState.Pending || o.State == OpState.Permanent) &&
+                              o.DbVersion == currentVersion))
                 return LibraryStatus.Edited;
             if (list.Count > 0) return LibraryStatus.WaitingReapply;
             return LibraryStatus.Original;
@@ -209,6 +217,9 @@ namespace Sefarim.Core
         public int RestoreAll(IProgress<string> progress = null)
         {
             var engine = RequireEngine();
+            if (Ops().Any(o => o.State == OpState.Permanent))
+                throw new InvalidOperationException("חלק מהמחיקות נעשו בלי גיבוי (מצב עדכון עצמי), ולכן אי אפשר להחזיר את הקובץ למקור. " +
+                                                    "להחזרה מלאה צריך הורדה מלאה של הספרייה דרך אוצריא.");
             var applied = Ops().Where(o => o.State == OpState.Applied).OrderByDescending(o => o.Id).ToList();
             foreach (var op in applied) engine.Restore(op, progress);
             if (applied.Count > 0) Store.SetMeta("restored_at_version", Version?.ToString());
@@ -220,8 +231,11 @@ namespace Sefarim.Core
         public AppliedOp UndoLast(IProgress<string> progress = null)
         {
             var engine = RequireEngine();
-            var last = Ops().Where(o => o.State == OpState.Applied).OrderByDescending(o => o.Id).FirstOrDefault();
+            // לא מדלגים על מחיקה קבועה: החזרה של פעולה מוקדמת ממנה עלולה להחזיר ספר לקטגוריה שנמחקה.
+            var last = Ops().Where(o => o.State == OpState.Applied || o.State == OpState.Permanent).OrderByDescending(o => o.Id).FirstOrDefault();
             if (last == null) return null;
+            if (last.State == OpState.Permanent)
+                throw new InvalidOperationException($"השינוי האחרון (\"{last.Intent.Summary}\") נעשה בלי גיבוי, ולכן אי אפשר לבטל אותו.");
             engine.Restore(last, progress);
             Store.DeleteOp(last.Id);
             AfterChange(progress);
@@ -232,7 +246,10 @@ namespace Sefarim.Core
         /// מחיל מחדש את כל הפעולות שהוחזרו, לפי הסדר המקורי. ספר או קטגוריה
         /// מזוהים לפי המזהה והשם, ואם המזהה השתנה בעדכון, לפי השם והמיקום.
         /// </summary>
-        public ReapplyResult ReapplyRestored(IProgress<string> progress = null)
+        /// <param name="permanentDeletes">
+        /// מצב "עדכון עצמי": מחיקות מוחלות בלי גיבוי שורות, עם האיתור הקפדני, ונרשמות גם כשאין מה למחוק.
+        /// </param>
+        public ReapplyResult ReapplyRestored(IProgress<string> progress = null, bool permanentDeletes = false)
         {
             var engine = RequireEngine();
             var result = new ReapplyResult();
@@ -244,7 +261,10 @@ namespace Sefarim.Core
                 try
                 {
                     progress?.Report("מחיל מחדש: " + intent.Summary);
-                    var done = Reapply(engine, catalog, intent, result, progress);
+                    var isDelete = intent.Kind == OpIntent.DeleteBooks || intent.Kind == OpIntent.DeleteCategories;
+                    var done = permanentDeletes && isDelete
+                        ? ReapplyAfterUpdate(engine, intent, result, progress) != null
+                        : Reapply(engine, catalog, intent, result, progress);
                     if (done) result.Applied++;
                     Store.DeleteOp(old.Id);
                 }
@@ -316,6 +336,165 @@ namespace Sefarim.Core
                 default:
                     throw new NotSupportedException("סוג פעולה לא מוכר: " + intent.Kind);
             }
+        }
+
+        /// <summary>מחיקות שעדיין יש להן גיבוי שורות (אפשר לבטל אותן).</summary>
+        public List<AppliedOp> UndoableDeletes() => Ops()
+            .Where(o => o.State == OpState.Applied &&
+                        (o.Intent.Kind == OpIntent.DeleteBooks || o.Intent.Kind == OpIntent.DeleteCategories))
+            .ToList();
+
+        /// <summary>
+        /// מצב עדכון עצמי: מפנה את גיבוי השורות של המחיקות. המחיקות נשארות בקובץ ונרשמות כקבועות
+        /// (אי אפשר לבטל אותן יותר). עריכות נשארות עם הגיבוי הקטן שלהן. מחזיר כמה מחיקות פונו.
+        /// </summary>
+        public int ReleaseDeleteBackups(IProgress<string> progress = null)
+        {
+            RequireEngine();
+            var deletes = UndoableDeletes();
+            if (deletes.Count == 0) return 0;
+            progress?.Report("מפנה את הגיבוי…");
+            using (var tx = Db.Begin())
+            {
+                foreach (var op in deletes)
+                {
+                    Store.DropOpRows(op);
+                    Store.UpdateOp(op.Id, OpState.Permanent, hashes: new Dictionary<string, string>());
+                }
+                tx.Commit();
+            }
+            // הקובץ של הגיבוי לא קטן מעצמו אחרי מחיקת שורות.
+            progress?.Report("מקטין את קובץ הגיבוי…");
+            Db.Exec($"VACUUM {BackupStore.Alias}");
+            return deletes.Count;
+        }
+
+        // ───────────── עדכון עצמי (אוצריא בלבד) ─────────────
+
+        /// <summary>
+        /// מחיל עדכון ספרייה של אוצריא על הקובץ הערוך, ובאותה טרנזקציה מחיל שוב את כל השינויים
+        /// של המשתמש. כל כשל – כולל שינוי שלא ניתן להחיל שוב – מבטל הכול, והקובץ נשאר כמו שהיה.
+        /// מחיקות הופכות לקבועות (בלי גיבוי שורות), כי השורות שבגיבוי שייכות לגרסה הקודמת.
+        /// </summary>
+        public SelfUpdateResult ApplyLibraryUpdate(PatchManifest m, string patchPath, bool checkForeignKeys = true,
+            IProgress<string> progress = null)
+        {
+            var engine = RequireEngine();
+            if (Kind != LibraryKind.Otzaria) throw new InvalidOperationException("עדכון עצמי אפשרי רק בספרייה של אוצריא.");
+            var ops = Ops().OrderBy(o => o.Id).ToList();
+            if (ops.Any(o => o.State == OpState.Restored || o.State == OpState.Pending))
+                throw new InvalidOperationException("יש שינויים שממתינים להחלה מחדש. יש להחיל אותם לפני העדכון.");
+
+            var reapply = new ReapplyResult();
+            var patch = PatchApplier.Apply(Db, patchPath, m, new PatchApplyOptions
+            {
+                CheckForeignKeys = checkForeignKeys,
+                RemoveOrphans = ops.Count > 0,
+                Progress = progress,
+                // הטבלאות שהמשתמש שינה לפני העדכון שונות מהרשמיות בכוונה.
+                UnverifiableTables = new HashSet<string>(ops.SelectMany(o => o.Tables), StringComparer.Ordinal),
+                BeforeVerify = _ =>
+                {
+                    engine.LibraryVersion = m.ToVersion;
+                    var touched = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var old in ops)
+                    {
+                        progress?.Report("מחיל מחדש: " + old.Intent.Summary);
+                        Store.DropOpRows(old);
+                        Store.DeleteOp(old.Id);
+                        var op = ReapplyAfterUpdate(engine, old.Intent, reapply, progress);
+                        touched.UnionWith(op.Tables);
+                        reapply.Applied++;
+                    }
+                    return touched;
+                },
+            });
+            Version = m.ToVersion;
+            return new SelfUpdateResult { Patch = patch, Reapply = reapply };
+        }
+
+        private AppliedOp ReapplyAfterUpdate(ChangeEngine engine, OpIntent intent, ReapplyResult result, IProgress<string> progress)
+        {
+            var catalog = Db.LoadCatalog();
+            switch (intent.Kind)
+            {
+                case OpIntent.DeleteBooks:
+                {
+                    var ids = new List<long>();
+                    var refs = new List<BookRef>();
+                    foreach (var r in intent.Books)
+                    {
+                        var (target, sweepOldId) = ResolveForDelete(catalog, r, result);
+                        if (target != null)
+                        {
+                            ids.Add(target.Id);
+                            refs.Add(BookRef.Of(target));
+                        }
+                        else refs.Add(r);
+                        // שורות שנשארו עם המזהה הישן בלי ספר (העדכון החזיר חלק מהספר) נמחקות גם הן.
+                        if (sweepOldId) ids.Add(r.Id);
+                    }
+                    var fresh = new OpIntent { Kind = intent.Kind, Summary = intent.Summary, Books = refs };
+                    return DeletePermanently(engine, fresh, ids, null, progress);
+                }
+                case OpIntent.DeleteCategories:
+                {
+                    var ids = new List<long>();
+                    var refs = new List<CategoryRef>();
+                    foreach (var r in intent.Categories)
+                    {
+                        var c = Resolver.Category(catalog, r);
+                        if (c != null)
+                        {
+                            ids.Add(c.Id);
+                            refs.Add(CategoryRef.Of(c));
+                            continue;
+                        }
+                        refs.Add(r);
+                        if (!catalog.Categories.ContainsKey(r.Id)) ids.Add(r.Id);
+                        else result.Notes.Add($"המזהה של הקטגוריה \"{r.Path}\" שייך עכשיו לקטגוריה אחרת, ולכן היא לא נמחקה.");
+                    }
+                    var fresh = new OpIntent { Kind = intent.Kind, Summary = intent.Summary, Categories = refs };
+                    return DeletePermanently(engine, fresh, null, ids, progress);
+                }
+                case OpIntent.EditBook:
+                case OpIntent.EditCategory:
+                {
+                    Reapply(engine, catalog, intent, result, progress);
+                    return Ops().OrderByDescending(o => o.Id).First();
+                }
+                default:
+                    throw new NotSupportedException("סוג פעולה לא מוכר: " + intent.Kind);
+            }
+        }
+
+        /// <summary>
+        /// איתור ספר למחיקה אחרי עדכון, בזהירות: לפי מזהה ושם; ואם לא – רק ספר אחד בדיוק עם
+        /// אותו שם ואותו נתיב קטגוריה. sweepOldId = אין בקובץ ספר עם המזהה הישן, ולכן בטוח
+        /// למחוק שורות שנשארו איתו.
+        /// </summary>
+        private static (BookInfo target, bool sweepOldId) ResolveForDelete(Catalog catalog, BookRef r, ReapplyResult result)
+        {
+            var exists = catalog.Books.TryGetValue(r.Id, out var byId);
+            if (exists && byId.Title == r.Title) return (byId, false);
+            var same = catalog.Books.Values.Where(b => b.Title == r.Title && b.Category?.Path == r.CategoryPath).ToList();
+            var target = same.Count == 1 ? same[0] : null;
+            if (exists && target == null)
+                result.Notes.Add($"המזהה של הספר \"{r.Title}\" שייך עכשיו לספר אחר (\"{byId.Title}\"), ולכן הוא לא נמחק.");
+            return (target, !exists);
+        }
+
+        private static AppliedOp DeletePermanently(ChangeEngine engine, OpIntent intent, IEnumerable<long> bookIds,
+            IEnumerable<long> categoryIds, IProgress<string> progress)
+        {
+            var plan = engine.PlanDelete(intent, bookIds, categoryIds, progress);
+            if (plan.Blockers.Count > 0) throw new InvalidOperationException($"{intent.Summary}: " + string.Join("; ", plan.Blockers));
+            if (plan.Tables.Count == 0)
+            {
+                engine.DropTemps();
+                return engine.RecordPermanent(intent);
+            }
+            return engine.ExecuteDelete(plan, progress, keepBackup: false);
         }
 
         /// <summary>מקטין את הקובץ בפועל אחרי מחיקות (VACUUM). דורש מקום פנוי זמני בגודל הקובץ.</summary>
