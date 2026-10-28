@@ -77,16 +77,37 @@ namespace Sefarim.Core
             public long CategoryId;
             public int OrderIndex;
             public List<string> Authors;
+
+            /// <summary>שדות 6–13 של CatalogBook (totalLines ודגלים), לספר שלא היה בקטלוג המקורי.</summary>
+            public long TotalLines;
+            public bool[] Flags;
         }
+
+        /// <summary>עמודות book שממופות לשדות 7–13 של CatalogBook, לפי הסדר.</summary>
+        private static readonly string[] FlagColumns =
+        {
+            "isBaseBook", "hasTargumConnection", "hasReferenceConnection", "hasSourceConnection",
+            "hasCommentaryConnection", "hasOtherConnection", "hasAltStructures",
+        };
 
         public static byte[] Rebuild(byte[] originalBytes, SeforimDb db)
         {
             var books = new Dictionary<long, DbBook>();
-            using (var cmd = db.Command("SELECT id, title, categoryId, orderIndex FROM book"))
+            var bookTable = db.Schema["book"];
+            var extra = (bookTable.HasColumn("totalLines") ? ", totalLines" : ", 0") +
+                        string.Concat(FlagColumns.Select(c => bookTable.HasColumn(c) ? ", " + Sql.Q(c) : ", 0"));
+            using (var cmd = db.Command("SELECT id, title, categoryId, orderIndex" + extra + " FROM book"))
             using (var r = cmd.ExecuteReader())
             {
                 while (r.Read())
-                    books[r.GetInt64(0)] = new DbBook { Title = r.GetString(1), CategoryId = r.GetInt64(2), OrderIndex = r.GetInt32(3), Authors = new List<string>() };
+                {
+                    books[r.GetInt64(0)] = new DbBook
+                    {
+                        Title = r.GetString(1), CategoryId = r.GetInt64(2), OrderIndex = r.GetInt32(3), Authors = new List<string>(),
+                        TotalLines = r.IsDBNull(4) ? 0 : r.GetInt64(4),
+                        Flags = FlagColumns.Select((c, i) => !r.IsDBNull(5 + i) && r.GetInt64(5 + i) != 0).ToArray(),
+                    };
+                }
             }
             if (db.Schema.Has("book_author"))
             {
@@ -98,10 +119,15 @@ namespace Sefarim.Core
                 }
             }
             var cats = new Dictionary<long, string>();
-            using (var cmd = db.Command("SELECT id, title FROM category"))
+            var catInfo = new Dictionary<long, (long? parent, int level)>();
+            using (var cmd = db.Command("SELECT id, title, parentId, " + (db.Schema["category"].HasColumn("level") ? "level" : "0") + " FROM category"))
             using (var r = cmd.ExecuteReader())
             {
-                while (r.Read()) cats[r.GetInt64(0)] = r.GetString(1);
+                while (r.Read())
+                {
+                    cats[r.GetInt64(0)] = r.GetString(1);
+                    catInfo[r.GetInt64(0)] = (r.IsDBNull(2) ? (long?)null : r.GetInt64(2), r.IsDBNull(3) ? 0 : r.GetInt32(3));
+                }
             }
 
             var root = Proto.Parse(originalBytes);
@@ -147,6 +173,50 @@ namespace Sefarim.Core
             foreach (var (target, book) in moved)
                 if (byId.TryGetValue(target, out var cat)) cat.Add(5, book);
 
+            // ספרים שנוספו (אינם בקטלוג המקורי): נבנים כמו ב-BuildCatalog של זית, כולל קטגוריות חדשות.
+            var present = new HashSet<long>();
+            void Collect(Proto.Message cat)
+            {
+                foreach (var f in cat.Fields.Where(f => f.Num == 5)) present.Add((long)f.Sub.Varint(1));
+                foreach (var f in cat.Fields.Where(f => f.Num == 6)) Collect(f.Sub);
+            }
+            foreach (var f in root.Fields.Where(f => f.Num == 1)) Collect(f.Sub);
+
+            Proto.Message EnsureCategory(long id, int depth)
+            {
+                if (byId.TryGetValue(id, out var existing)) return existing;
+                if (depth > 100 || !catInfo.TryGetValue(id, out var info)) return null;
+                var parent = info.parent.HasValue ? EnsureCategory(info.parent.Value, depth + 1) : null;
+                if (info.parent.HasValue && parent == null) return null;
+                var m = new Proto.Message();
+                m.SetVarint(1, (ulong)id);
+                m.SetString(2, cats[id]);
+                m.SetVarint(3, (ulong)info.level);
+                if (info.parent.HasValue) m.SetVarint(4, (ulong)info.parent.Value);
+                if (parent == null) root.Add(1, m);
+                else parent.Add(6, m);
+                byId[id] = m;
+                return m;
+            }
+
+            foreach (var kv in books.Where(kv => !present.Contains(kv.Key)).OrderBy(kv => kv.Value.OrderIndex).ThenBy(kv => kv.Key))
+            {
+                var cat = EnsureCategory(kv.Value.CategoryId, 0);
+                if (cat == null) continue;
+                var b = kv.Value;
+                var m = new Proto.Message();
+                m.SetVarint(1, (ulong)kv.Key);
+                m.SetString(2, b.Title);
+                m.SetVarint(3, (ulong)b.CategoryId);
+                // kotlinx.serialization לא כותב ערכי ברירת מחדל (order=999, רשימה ריקה, 0, false).
+                if (b.OrderIndex != 999) m.SetFloat(4, b.OrderIndex);
+                if (b.Authors.Count > 0) m.SetStrings(5, b.Authors);
+                if (b.TotalLines != 0) m.SetVarint(6, (ulong)b.TotalLines);
+                for (var i = 0; i < b.Flags.Length; i++)
+                    if (b.Flags[i]) m.SetVarint(7 + i, 1);
+                InsertBookByOrder(cat, m, b.OrderIndex);
+            }
+
             int bookCount = 0, catCount = 0;
             void Count(Proto.Message cat)
             {
@@ -158,6 +228,31 @@ namespace Sefarim.Core
             if (root.Has(3)) root.SetVarint(3, (ulong)bookCount);
             if (root.Has(4)) root.SetVarint(4, (ulong)catCount);
             return root.ToBytes();
+        }
+
+        /// <summary>מכניס ספר לרשימת הספרים של קטגוריה, אחרי הספר האחרון שהסדר שלו קטן או שווה (כמו sortedBy של זית).</summary>
+        private static void InsertBookByOrder(Proto.Message cat, Proto.Message book, int order)
+        {
+            var field = new Proto.Field { Num = 5, Wire = 2 };
+            field.SetSub(book);
+            var at = -1;
+            for (var i = 0; i < cat.Fields.Count; i++)
+            {
+                var f = cat.Fields[i];
+                if (f.Num != 5) continue;
+                var o = f.Sub.Fields.FirstOrDefault(x => x.Num == 4 && x.Wire == 5);
+                var value = o == null ? 999f : BitConverter.ToSingle(o.Bytes, 0);
+                if (value <= order) at = i;
+                else break;
+            }
+            if (at < 0)
+            {
+                var first = cat.Fields.FindIndex(x => x.Num == 5);
+                if (first >= 0) cat.Fields.Insert(first, field);
+                else cat.Add(5, book);
+                return;
+            }
+            cat.Fields.Insert(at + 1, field);
         }
     }
 

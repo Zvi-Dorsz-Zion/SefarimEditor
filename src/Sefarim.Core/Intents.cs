@@ -13,12 +13,16 @@ namespace Sefarim.Core
         public const string EditBook = "editBook";
         public const string EditCategory = "editCategory";
 
+        /// <summary>הוספת ספר מקובץ טקסט (זית בלבד). Books מכיל את הספר שנוסף.</summary>
+        public const string AddBook = "addBook";
+
         public string Kind { get; set; }
         public string Summary { get; set; }
         public List<BookRef> Books { get; set; } = new List<BookRef>();
         public List<CategoryRef> Categories { get; set; } = new List<CategoryRef>();
         public BookChanges BookChanges { get; set; }
         public CategoryChanges CategoryChanges { get; set; }
+        public AddBookSpec AddBookSpec { get; set; }
 
         private static readonly JsonSerializerOptions Options = new JsonSerializerOptions
         {
@@ -74,6 +78,32 @@ namespace Sefarim.Core
         public int? OrderIndex { get; set; }
 
         public bool IsEmpty => Title == null && OrderIndex == null;
+    }
+
+    /// <summary>
+    /// מה המשתמש ביקש להוסיף. הטקסט עצמו שמור בתיקיית הגיבוי (SourceFile), כדי שאחרי עדכון של זית
+    /// (שמחליף את כל הקובץ) אפשר יהיה להוסיף את הספר שוב.
+    /// </summary>
+    public sealed class AddBookSpec
+    {
+        public string Title { get; set; }
+        public List<string> Authors { get; set; } = new List<string>();
+        public string ShortDesc { get; set; }
+
+        /// <summary>קטגוריה קיימת. כשיש NewCategoryTitle – זו קטגוריית האב של הקטגוריה החדשה (null = ברמה העליונה).</summary>
+        public CategoryRef Category { get; set; }
+
+        /// <summary>שם קטגוריה חדשה שתיווצר בתוך Category. null = הספר נכנס ל-Category עצמה.</summary>
+        public string NewCategoryTitle { get; set; }
+
+        /// <summary>שם הקובץ בתיקיית הספרים שנוספו (לפי SHA-256 של התוכן), ושם הקובץ המקורי לתצוגה.</summary>
+        public string SourceFile { get; set; }
+        public string OriginalFileName { get; set; }
+        public string Sha256 { get; set; }
+
+        /// <summary>מזהי הספר והקטגוריה החדשה כפי שנקבעו בהוספה; בהוספה חוזרת משתמשים בהם שוב אם הם פנויים.</summary>
+        public long? BookId { get; set; }
+        public long? NewCategoryId { get; set; }
     }
 
     public enum OpState

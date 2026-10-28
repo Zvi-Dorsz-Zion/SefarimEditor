@@ -128,7 +128,12 @@ namespace SefarimEditor
                 sv.ScrollToEnd();
                 await Task.Delay(400);
             }
-            var root = (FrameworkElement)Content;
+            SaveSnapshot((FrameworkElement)Content, path);
+            Close();
+        }
+
+        private static void SaveSnapshot(FrameworkElement root, string path)
+        {
             var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap((int)root.ActualWidth, (int)root.ActualHeight, 96, 96, PixelFormats.Pbgra32);
             rtb.Render(root);
             // היפוך המראה של החלון (מימין לשמאל) נעשה ברמת החלון, ולכן ציור התוכן לבדו יוצא הפוך.
@@ -136,6 +141,26 @@ namespace SefarimEditor
             var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();
             enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(flipped));
             using (var fs = File.Create(path)) enc.Save(fs);
+        }
+
+        /// <summary>מצב בדיקה: מצייר את חלון "הוספת ספר" עם קובץ נתון לקובץ PNG ונסגר.</summary>
+        internal async Task SnapshotAddDialog(string path, string file, long? category)
+        {
+            for (var i = 0; i < 100 && _catalog == null; i++) await Task.Delay(200);
+            CategoryNode cat = null;
+            if (category.HasValue) _catalog?.Categories.TryGetValue(category.Value, out cat);
+            var dlg = new AddBookWindow(this, _catalog, cat)
+            {
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Left = -30000,
+                Top = 0,
+                ShowActivated = false,
+            };
+            dlg.Show();
+            dlg.LoadFile(file);
+            await Task.Delay(800);
+            SaveSnapshot((FrameworkElement)dlg.Content, path);
+            dlg.Close();
             Close();
         }
 
@@ -180,6 +205,7 @@ namespace SefarimEditor
             WatchThisLibrary.IsChecked = _cfg.Watch;
             BackupPath.Text = _cfg.BackupRoot ?? "";
             FillMethod();
+            AddBookButton.Visibility = choice.Kind == LibraryKind.Zayit ? Visibility.Visible : Visibility.Collapsed;
         }
 
         // ───────────────────────── שיטת העדכון ─────────────────────────
@@ -472,7 +498,8 @@ namespace SefarimEditor
                 {
                     Summary = o.Intent.Summary,
                     Details = $"{o.Created:dd/MM/yyyy HH:mm} · " +
-                              (o.State == OpState.Permanent ? "בלי גיבוי (אי אפשר לבטל)" : $"{o.Rows:N0} שורות בגיבוי") +
+                              (o.State == OpState.Permanent ? "בלי גיבוי (אי אפשר לבטל)"
+                                  : o.Intent.Kind == OpIntent.AddBook ? $"{o.Rows:N0} רשומות נוספו" : $"{o.Rows:N0} שורות בגיבוי") +
                               (o.DbVersion.HasValue ? $" · גרסת ספרייה {o.DbVersion}" : ""),
                     StateText = permanent ? "מוחל (קבוע)" : applied ? "מוחל" : "ממתין להחלה",
                     StateBrush = (Brush)FindResource(applied ? "Primary" : "Warn"),
@@ -730,6 +757,37 @@ namespace SefarimEditor
             var intent = Intents.DeleteBooks(books);
             await RunDelete(intent, books.Select(b => b.Id).ToList(), null,
                 books.Count == 1 ? $"למחוק את \"{books[0].Title}\"?" : $"למחוק {books.Count:N0} ספרים?");
+        }
+
+        // ───────────────────────── הוספת ספר (זית) ─────────────────────────
+
+        private async void AddBook_Click(object sender, RoutedEventArgs e)
+        {
+            if (_choice?.Kind != LibraryKind.Zayit || _catalog == null || _ro == null) return;
+            var reason = ChangeEngine.AddBookUnsupportedReason(_ro);
+            if (reason != null)
+            {
+                Dialogs.Info(this, "אי אפשר להוסיף ספרים", reason);
+                return;
+            }
+            if (!EnsureCanWrite()) return;
+            var initial = CategoryTree.SelectedItem as CategoryNode ?? _book?.Category;
+            var dlg = new AddBookWindow(this, _catalog, initial);
+            if (dlg.ShowDialog() != true || dlg.Spec == null) return;
+            var spec = dlg.Spec;
+            var bytes = dlg.FileBytes;
+            var ok = await RunWrite("מוסיף את הספר…", (s, p) => s.AddBook(spec, bytes, p));
+            if (!ok) return;
+            if (spec.BookId.HasValue && _catalog.Books.TryGetValue(spec.BookId.Value, out var added))
+            {
+                if (added.Category != null) ShowCategoryBooks(added.Category);
+                BookList.SelectedItem = added;
+                ShowBook(added);
+            }
+            Dialogs.Info(this, "הספר נוסף",
+                $"הספר \"{spec.Title}\" נוסף לזית. בפתיחה הבאה של זית הוא יופיע בעץ הספרים.\n\n" +
+                "הספר לא יופיע בתוצאות החיפוש של זית. אפשר לבטל את ההוספה בלשונית \"שינויים ועדכונים\" (\"בטל את השינוי האחרון\"), " +
+                "או למחוק את הספר כמו כל ספר אחר.");
         }
 
         // ───────────────────────── עריכת קטגוריה ─────────────────────────

@@ -86,6 +86,8 @@
                                         <StackPanel Orientation="Horizontal">
                                             <Button x:Name="DeleteBooksButton" Style="{StaticResource DangerButton}" Content="🗑  מחק ספרים נבחרים" Click="DeleteBooks_Click" IsEnabled="False"/>
                                             <Button Content="בחר הכול" Click="SelectAll_Click"/>
+                                            <Button x:Name="AddBookButton" Content="➕  הוסף ספר…" Click="AddBook_Click" Visibility="Collapsed"
+                                                    ToolTip="הוספת ספר מקובץ טקסט לספרייה של זית"/>
                                         </StackPanel>
                                     </DockPanel>
                                 </Border>

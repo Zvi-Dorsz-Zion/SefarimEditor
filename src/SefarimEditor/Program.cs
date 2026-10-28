@@ -71,8 +71,13 @@ namespace SefarimEditor
             long.TryParse(Arg(args, "--category"), out var cat);
             long.TryParse(Arg(args, "--book"), out var book);
             int.TryParse(Arg(args, "--tab"), out var tab);
+            var addFile = Arg(args, "--add-dialog");
             window.Loaded += async (s, e) =>
-                await window.Snapshot(path, tab, cat == 0 ? (long?)null : cat, book == 0 ? (long?)null : book, Arg(args, "--search"));
+            {
+                // --add-dialog קובץ.txt: מצייר את חלון "הוספת ספר" עם הקובץ הזה, במקום החלון הראשי.
+                if (addFile != null) await window.SnapshotAddDialog(path, addFile, cat == 0 ? (long?)null : cat);
+                else await window.Snapshot(path, tab, cat == 0 ? (long?)null : cat, book == 0 ? (long?)null : book, Arg(args, "--search"));
+            };
             return app.Run(window);
         }
 

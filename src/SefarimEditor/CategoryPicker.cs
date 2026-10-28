@@ -13,7 +13,7 @@ namespace SefarimEditor
 
         public CategoryNode Selected { get; private set; }
 
-        public CategoryPicker(Window owner, IEnumerable<CategoryNode> roots, CategoryNode current)
+        public CategoryPicker(Window owner, IEnumerable<CategoryNode> roots, CategoryNode current, string prompt = null)
         {
             Title = "בחירת קטגוריה";
             Owner = owner;
@@ -25,7 +25,7 @@ namespace SefarimEditor
             Background = (Brush)Application.Current.FindResource("Surface");
 
             var dock = new DockPanel { Margin = new Thickness(16) };
-            var head = new TextBlock { Text = "לאיזו קטגוריה להעביר את הספר?", Style = (Style)Application.Current.FindResource("H2") };
+            var head = new TextBlock { Text = prompt ?? "לאיזו קטגוריה להעביר את הספר?", Style = (Style)Application.Current.FindResource("H2") };
             DockPanel.SetDock(head, Dock.Top);
             dock.Children.Add(head);
 

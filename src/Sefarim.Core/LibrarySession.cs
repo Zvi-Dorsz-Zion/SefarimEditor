@@ -81,6 +81,77 @@ namespace Sefarim.Core
             return op;
         }
 
+        /// <summary>
+        /// מוסיף ספר מקובץ טקסט (זית בלבד). עותק של הקובץ נשמר בתיקיית הגיבוי, כדי שאפשר יהיה
+        /// להוסיף את הספר שוב אחרי עדכון של זית (שמחליף את כל הקובץ).
+        /// </summary>
+        public AppliedOp AddBook(AddBookSpec spec, byte[] fileBytes, IProgress<string> progress = null)
+        {
+            var engine = RequireEngine();
+            if (Kind != LibraryKind.Zayit) throw new InvalidOperationException("הוספת ספרים אפשרית רק בספרייה של זית.");
+            var reason = ChangeEngine.AddBookUnsupportedReason(Db);
+            if (reason != null) throw new NotSupportedException(reason);
+            var text = BookImport.Read(fileBytes, (spec.Title ?? "").Trim());
+            spec.Sha256 = BookImport.Sha256(fileBytes);
+            // שם קצר (נתיבים ארוכים מ-260 תווים נכשלים ב-.NET Framework); התוכן נבדק מול ה-SHA-256 המלא בכל קריאה.
+            spec.SourceFile = spec.Sha256.Substring(0, 16) + ".txt";
+            var stored = Path.Combine(AddedBooksFolder, spec.SourceFile);
+            var created = !File.Exists(stored);
+            if (created)
+            {
+                Directory.CreateDirectory(AddedBooksFolder);
+                var tmp = stored + ".tmp";
+                File.WriteAllBytes(tmp, fileBytes);
+                if (BookImport.Sha256(File.ReadAllBytes(tmp)) != spec.Sha256)
+                {
+                    File.Delete(tmp);
+                    throw new IOException("שמירת עותק הספר בתיקיית הגיבוי נכשלה (התוכן שנשמר שונה).");
+                }
+                File.Move(tmp, stored);
+            }
+            AppliedOp op;
+            try
+            {
+                op = engine.AddBook(Intents.AddBook(spec), text, progress);
+            }
+            catch
+            {
+                if (created) DeleteUnusedSource(spec.SourceFile);
+                throw;
+            }
+            AfterChange(progress);
+            return op;
+        }
+
+        /// <summary>תיקיית העותקים של ספרים שנוספו, ליד מאגר הגיבוי.</summary>
+        public string AddedBooksFolder => Store == null ? null : Path.Combine(Path.GetDirectoryName(Store.FilePath) ?? "", "added-books");
+
+        /// <summary>קורא את העותק השמור של ספר שנוסף, ומוודא שהוא זהה למה שנשמר.</summary>
+        private byte[] ReadStoredSource(AddBookSpec spec)
+        {
+            var path = Path.Combine(AddedBooksFolder ?? "", spec.SourceFile ?? "");
+            if (string.IsNullOrEmpty(spec.SourceFile) || !File.Exists(path))
+                throw new FileNotFoundException($"העותק של הספר \"{spec.Title}\" לא נמצא בתיקיית הגיבוי ({path}).");
+            var bytes = File.ReadAllBytes(path);
+            if (BookImport.Sha256(bytes) != spec.Sha256)
+                throw new InvalidDataException($"העותק של הספר \"{spec.Title}\" בתיקיית הגיבוי השתנה, ולכן לא ניתן להוסיף אותו שוב.");
+            return bytes;
+        }
+
+        /// <summary>מוחק עותק של ספר שנוסף, אם אף פעולה רשומה כבר לא צריכה אותו.</summary>
+        private void DeleteUnusedSource(string sourceFile)
+        {
+            if (string.IsNullOrEmpty(sourceFile) || AddedBooksFolder == null) return;
+            if (Ops().Any(o => o.Intent.AddBookSpec?.SourceFile == sourceFile)) return;
+            try
+            {
+                var path = Path.Combine(AddedBooksFolder, sourceFile);
+                if (File.Exists(path)) File.Delete(path);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
         private void AfterChange(IProgress<string> progress)
         {
             if (Kind != LibraryKind.Zayit || BackupRoot == null) return;
@@ -174,12 +245,16 @@ namespace Sefarim.Core
         {
             var version = Version;
             var stale = Ops().Where(o => (o.State == OpState.Applied || o.State == OpState.Permanent) && o.DbVersion != version).ToList();
+            var stillApplied = stale.ToDictionary(o => o.Id, o => o.State == OpState.Applied && Engine.StillApplied(o));
+            // זית מחליפה את כל הקובץ. אם התגלה שפעולה כלשהי כבר לא בקובץ, גם שינויים בספרים שהוספנו
+            // נעלמו – כולל מחיקה של ספר כזה, שנראית "עדיין מוחלת" רק כי הספר ממילא לא בקובץ החדש.
+            var zayitReplaced = Kind == LibraryKind.Zayit && stillApplied.Values.Any(v => !v);
             var replaced = 0;
             foreach (var op in stale)
             {
                 // רק מספר הגרסה השתנה, והשינוי עדיין בקובץ: מעדכנים את הגרסה ושומרים על הגיבוי.
                 // מחיקה קבועה אי אפשר לבדוק; גרסה שהשתנתה בלי התוכנה פירושה שאוצריא הורידה קובץ חדש.
-                var still = op.State == OpState.Applied && Engine.StillApplied(op);
+                var still = stillApplied[op.Id] && !(zayitReplaced && TouchesAddedContent(op));
                 using (var tx = Db.Begin())
                 {
                     if (still) Store.SetOpVersion(op.Id, version);
@@ -194,6 +269,12 @@ namespace Sefarim.Core
             }
             return replaced;
         }
+
+        /// <summary>פעולה על ספר או קטגוריה שהוספנו (מזהה בטווח השמור), או ההוספה עצמה.</summary>
+        private static bool TouchesAddedContent(AppliedOp op) =>
+            op.Intent.Kind == OpIntent.AddBook ||
+            op.Intent.Books.Any(b => b.Id >= BookImport.ReservedIdBase) ||
+            op.Intent.Categories.Any(c => c.Id >= BookImport.ReservedIdBase);
 
         public List<AppliedOp> Ops() => Store?.LoadOps() ?? new List<AppliedOp>();
 
@@ -238,6 +319,7 @@ namespace Sefarim.Core
                 throw new InvalidOperationException($"השינוי האחרון (\"{last.Intent.Summary}\") נעשה בלי גיבוי, ולכן אי אפשר לבטל אותו.");
             engine.Restore(last, progress);
             Store.DeleteOp(last.Id);
+            if (last.Intent.Kind == OpIntent.AddBook) DeleteUnusedSource(last.Intent.AddBookSpec?.SourceFile);
             AfterChange(progress);
             return last;
         }
@@ -331,6 +413,19 @@ namespace Sefarim.Core
                     var c = Resolver.Category(catalog, r) ?? throw new InvalidOperationException($"הקטגוריה \"{r.Path}\" לא נמצאה.");
                     intent.Categories[0] = CategoryRef.Of(c);
                     engine.EditCategory(intent, c.Id, intent.CategoryChanges);
+                    return true;
+                }
+                case OpIntent.AddBook:
+                {
+                    var spec = intent.AddBookSpec ?? throw new InvalidOperationException("חסרים פרטי הספר שנוסף.");
+                    var bytes = ReadStoredSource(spec);
+                    if (spec.Category != null)
+                    {
+                        var c = Resolver.Category(catalog, spec.Category) ??
+                                throw new InvalidOperationException($"הקטגוריה \"{spec.Category.Path}\" של הספר \"{spec.Title}\" לא נמצאה.");
+                        spec.Category = CategoryRef.Of(c);
+                    }
+                    engine.AddBook(Intents.AddBook(spec), BookImport.Read(bytes, spec.Title), progress);
                     return true;
                 }
                 default:
@@ -551,6 +646,13 @@ namespace Sefarim.Core
             Books = new List<BookRef> { BookRef.Of(book) },
             BookChanges = ch,
             Summary = $"עריכת הספר \"{book.Title}\"",
+        };
+
+        public static OpIntent AddBook(AddBookSpec spec) => new OpIntent
+        {
+            Kind = OpIntent.AddBook,
+            AddBookSpec = spec,
+            Summary = $"הוספת הספר \"{spec.Title?.Trim()}\"",
         };
 
         public static OpIntent EditCategory(CategoryNode cat, CategoryChanges ch) => new OpIntent

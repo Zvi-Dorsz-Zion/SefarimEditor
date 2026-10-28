@@ -16,7 +16,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Product>עורך הספרייה</Product>
     <AssemblyTitle>עורך הספרייה</AssemblyTitle>
-    <Version>2.0.0</Version>
+    <Version>2.1.0</Version>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <FodyGenerateXsd>false</FodyGenerateXsd>
     <!-- לא להעתיק את e_sqlite3.dll ליד ה-EXE: היא ארוזה בתוכו -->

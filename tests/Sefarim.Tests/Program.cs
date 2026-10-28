@@ -105,6 +105,9 @@ namespace Sefarim.Tests
             var selfUpdate = Array.IndexOf(args, "--self-update");
             if (selfUpdate >= 0) return SelfUpdateTest(dbPath, backupRoot, args[selfUpdate + 1], args[selfUpdate + 2], progress);
 
+            // --add-book: הוספת ספרים לעותק של ספריית זית, ביטול, החזרה למקור, החלה מחדש והחלפת קובץ מדומה
+            if (args.Contains("--add-book")) return AddBookTest(dbPath, backupRoot, quick, progress);
+
             try
             {
                 var sw = Stopwatch.StartNew();
@@ -260,6 +263,407 @@ namespace Sefarim.Tests
         }
 
         private static void Log(string s) => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {s}");
+
+        // ───────────────────────── הוספת ספרים (זית) ─────────────────────────
+
+        private static readonly string[] AddedTables =
+            { "book", "line", "tocEntry", "tocText", "line_toc", "category", "category_closure", "book_has_links", "book_author", "author" };
+
+        private static int AddBookTest(string dbPath, string backupRoot, bool quick, IProgress<string> progress)
+        {
+            try
+            {
+                var sw = Stopwatch.StartNew();
+                var dir = Path.GetDirectoryName(dbPath);
+                var catalogPath = Path.Combine(dir, ZayitCatalog.FileName);
+                var releasePath = Path.Combine(dir, "release_info.txt");
+                var catalogBefore = File.ReadAllBytes(catalogPath);
+                var releaseBefore = File.ReadAllText(releasePath);
+                string h0 = null;
+                if (!quick)
+                {
+                    Log("מחשב טביעת אצבע מלאה של הקובץ המקורי…");
+                    h0 = FullFingerprint(dbPath);
+                    Log($"  {h0}  ({sw.Elapsed.TotalMinutes:N1} דק')");
+                }
+                var fkBefore = ForeignKeyViolations(dbPath);
+                Log($"הפרות קשרים בקובץ המקורי (בטבלאות ההוספה): {fkBefore}");
+
+                // ספר א: כותרות בכמה רמות, ניקוד וטעמים, מקף, ישות, כותרת ריקה, קפיצת רמה, שורות ריקות.
+                var linesA = new[]
+                {
+                    "<h1>ספר בדיקה להוספה</h1>",
+                    "הקדמה קצרה &amp; ראשונה",
+                    "",
+                    "<h2>פרק א</h2>",
+                    "(א) בְּרֵאשִׁ֖ית בָּרָ֣א אֱלֹהִ֑ים",
+                    "שורה שנייה בפרק",
+                    "<h3>סִימָן רִאשׁוֹן</h3>",
+                    "<b>מודגש</b> וטקסט",
+                    "<h2></h2>",
+                    "שורה אחרי כותרת ריקה",
+                    "<h2>פרק ב</h2>",
+                    "<h4>קפיצה מ-2 ל-4 עַל־פִּי</h4>",
+                    "טקסט בקפיצה",
+                    "<h2>כותרת ייחודית לבדיקה 7f3a</h2>",
+                    "אחרון",
+                    "",
+                    "",
+                };
+                var bytesA = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(string.Join("\r\n", linesA))).ToArray();
+                // ספר ב: בלי כותרות, בקידוד Windows-1255.
+                var bytesB = Encoding.GetEncoding(1255).GetBytes("שורה ראשונה בלי כותרות\nשורה שנייה\n\nשורה רביעית");
+
+                long idA, idB, newCat;
+                CategoryNode target, parentOfNew;
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    Assert(ChangeEngine.AddBookUnsupportedReason(s.Db) == null, "מבנה הקובץ מתאים להוספה");
+                    var cat = s.Db.LoadCatalog();
+                    target = cat.Categories.Values.Where(c => c.Books.Count >= 3 && c.Parent != null).OrderBy(c => c.Id).First();
+                    parentOfNew = cat.Categories.Values.Where(c => c.Parent != null && c.Parent.Parent != null && c.Children.Count > 0).OrderBy(c => c.Id).First();
+                    var existingAuthor = s.Db.AllAuthors().First();
+                    Log($"יעד ספר א: \"{target.Path}\"; קטגוריה חדשה בתוך \"{parentOfNew.Path}\"; מחבר קיים \"{existingAuthor}\"");
+
+                    var specA = new AddBookSpec
+                    {
+                        Title = "ספר בדיקה להוספה",
+                        Authors = new List<string> { existingAuthor, "מחבר חדש לבדיקה 7f3a" },
+                        ShortDesc = "תיאור קצר לבדיקה",
+                        Category = CategoryRef.Of(target),
+                        OriginalFileName = "ספר בדיקה.txt",
+                    };
+                    var opA = Timed2("הוספת ספר א", () => s.AddBook(specA, bytesA, progress));
+                    idA = specA.BookId.Value;
+                    var specB = new AddBookSpec
+                    {
+                        Title = "ספר ב בלי כותרות",
+                        Category = CategoryRef.Of(parentOfNew),
+                        NewCategoryTitle = "קטגוריה חדשה לבדיקה",
+                        OriginalFileName = "ב.txt",
+                    };
+                    Timed2("הוספת ספר ב (קטגוריה חדשה)", () => s.AddBook(specB, bytesB, progress));
+                    idB = specB.BookId.Value;
+                    newCat = specB.NewCategoryId.Value;
+                    Log($"  מזהים: ספר א {idA}, ספר ב {idB}, קטגוריה {newCat}; טבלאות: {string.Join(",", opA.Tables)}; {opA.Rows:N0} מפתחות");
+                    Assert(idA >= BookImport.ReservedIdBase && idB >= BookImport.ReservedIdBase && newCat >= BookImport.ReservedIdBase, "המזהים בטווח השמור");
+
+                    VerifyAddedBook(s.Db, idA, specA.Title, BookImport.Read(bytesA, specA.Title), target.Id);
+                    VerifyAddedBook(s.Db, idB, specB.Title, BookImport.Read(bytesB, specB.Title), newCat);
+                    Assert(Convert.ToInt64(s.Db.Scalar("SELECT hasTeamim + hasNekudot FROM book WHERE id=$b", ("$b", idA))) == 2, "דגלי ניקוד וטעמים בספר א");
+                    Assert(Convert.ToInt64(s.Db.Scalar("SELECT hasTeamim + hasNekudot FROM book WHERE id=$b", ("$b", idB))) == 0, "בלי דגלים בספר ב");
+                    Assert(s.Db.Scalar("SELECT heShortDesc FROM book WHERE id=$b", ("$b", idA)) as string == "תיאור קצר לבדיקה", "התיאור נשמר");
+                    var reused = Convert.ToInt64(s.Db.Scalar("SELECT t.textId FROM tocEntry t JOIN tocText x ON x.id=t.textId WHERE t.bookId=$b AND x.text='פרק א'", ("$b", idA)));
+                    Assert(reused < BookImport.ReservedIdBase, "טקסט כותרת קיים (\"פרק א\") משותף ולא נוסף שוב");
+                    Assert(s.Db.Scalar("SELECT 1 FROM tocText WHERE text='קפיצה מ-2 ל-4 על פי'") != null, "כותרת: בלי ניקוד, מקף הפך לרווח");
+                    var authors = s.Db.LoadDetails(s.Db.LoadCatalog().Books[idA]).Authors;
+                    Assert(authors.Count == 2 && authors.Contains(existingAuthor) && authors.Contains("מחבר חדש לבדיקה 7f3a"), "המחברים");
+                    var parentLevel = Convert.ToInt32(s.Db.Scalar("SELECT level FROM category WHERE id=$c", ("$c", parentOfNew.Id)));
+                    Assert(Convert.ToInt32(s.Db.Scalar("SELECT level FROM category WHERE id=$c", ("$c", newCat))) == parentLevel + 1, "רמת הקטגוריה החדשה");
+                    var closure = Convert.ToInt64(s.Db.Scalar("SELECT count(*) FROM category_closure WHERE descendantId=$c", ("$c", newCat)));
+                    var parentClosure = Convert.ToInt64(s.Db.Scalar("SELECT count(*) FROM category_closure WHERE descendantId=$c", ("$c", parentOfNew.Id)));
+                    Assert(closure == parentClosure + 1, $"category_closure של הקטגוריה החדשה ({closure} שורות)");
+                    Assert(s.Db.LoadCatalog().Categories[newCat].Path == parentOfNew.Path + "/קטגוריה חדשה לבדיקה", "נתיב הקטגוריה החדשה");
+
+                    var ch = new BookChanges { Title = "ספר בדיקה להוספה (נערך)" };
+                    var bookA = s.Db.LoadCatalog().Books[idA];
+                    s.EditBook(Intents.EditBook(bookA, ch), idA, ch, progress);
+                    Assert(s.Status() == LibraryStatus.Edited, "מצב: ערוך");
+                    Assert(File.Exists(Path.Combine(s.AddedBooksFolder, specA.SourceFile)) && File.Exists(Path.Combine(s.AddedBooksFolder, specB.SourceFile)), "עותקי הספרים נשמרו בתיקיית הגיבוי");
+                }
+                Assert(ForeignKeyViolations(dbPath) == fkBefore, "אין הפרות קשרים חדשות");
+                VerifyCatalog(catalogPath, catalogBefore, idA, "ספר בדיקה להוספה (נערך)", target.Id, idB, newCat, parentOfNew.Id);
+
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    Timed("ביטול העריכה", () => s.UndoLast(progress));
+                    Assert(s.Db.LoadCatalog().Books[idA].Title == "ספר בדיקה להוספה", "העריכה בוטלה");
+                    Timed("החזרה למקור", () => Log($"  הוחזרו {s.RestoreAll(progress)} פעולות"));
+                    Assert(s.Status() == LibraryStatus.WaitingReapply, "מצב: ממתין להחלה מחדש");
+                    Assert(NoReservedRows(s.Db), "אין שורות בטווח השמור");
+                    Assert(File.ReadAllBytes(catalogPath).SequenceEqual(catalogBefore), "קטלוג זית זהה בדיוק למקור");
+                }
+                if (!quick)
+                {
+                    Log("מחשב טביעת אצבע מלאה אחרי ההחזרה…");
+                    Assert(FullFingerprint(dbPath) == h0, "הקובץ זהה למקור אחרי ההחזרה");
+                }
+
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    ReapplyResult res = null;
+                    Timed("החלה מחדש", () => res = s.ReapplyRestored(progress));
+                    foreach (var p in res.Problems) Log("  בעיה: " + p);
+                    Assert(res.Problems.Count == 0 && res.Applied == 2, $"שתי ההוספות הוחלו מחדש ({res.Applied})");
+                    var cat = s.Db.LoadCatalog();
+                    Assert(cat.Books.ContainsKey(idA) && cat.Books.ContainsKey(idB) && cat.Categories.ContainsKey(newCat), "אותם מזהים בהוספה החוזרת");
+                    var ch = new BookChanges { Title = "ספר בדיקה להוספה (נערך)" };
+                    s.EditBook(Intents.EditBook(cat.Books[idA], ch), idA, ch, progress);
+                }
+                VerifyCatalog(catalogPath, catalogBefore, idA, "ספר בדיקה להוספה (נערך)", target.Id, idB, newCat, parentOfNew.Id);
+
+                // זית עדכנה רק את מספר הגרסה, והספרים עדיין בקובץ: הפעולות נשארות מוחלות.
+                File.WriteAllText(releasePath, "29990101000000");
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    Assert(s.ReplacedOps == 0 && s.Status() == LibraryStatus.Edited, "שינוי גרסה בלבד: השינויים זוהו כקיימים");
+                }
+
+                // זית הורידה קובץ חדש (מדמים: השורות שלנו נעלמו, הקטלוג חזר למקור, הגרסה התקדמה).
+                using (var db = SeforimDb.Open(dbPath, readOnly: false)) DeleteReservedRows(db);
+                File.WriteAllBytes(catalogPath, catalogBefore);
+                File.WriteAllText(releasePath, "29990202000000");
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    Assert(s.ReplacedOps == 3, $"זוהתה החלפת קובץ ({s.ReplacedOps} פעולות)");
+                    Assert(s.Status() == LibraryStatus.WaitingReapply, "מצב: ממתין להחלה מחדש");
+                    var res = s.ReapplyRestored(progress);
+                    foreach (var p in res.Problems) Log("  בעיה: " + p);
+                    Assert(res.Problems.Count == 0 && res.Applied == 3, $"הוחלו שוב 3 פעולות ({res.Applied})");
+                    var cat = s.Db.LoadCatalog();
+                    Assert(cat.Books[idA].Title == "ספר בדיקה להוספה (נערך)" && cat.Books.ContainsKey(idB), "הספרים והעריכה חזרו");
+                    VerifyAddedBook(s.Db, idA, "ספר בדיקה להוספה", BookImport.Read(bytesA, "ספר בדיקה להוספה"), target.Id, editedTitle: "ספר בדיקה להוספה (נערך)");
+                }
+                VerifyCatalog(catalogPath, catalogBefore, idA, "ספר בדיקה להוספה (נערך)", target.Id, idB, newCat, parentOfNew.Id);
+                Assert(ForeignKeyViolations(dbPath) == fkBefore, "אין הפרות קשרים חדשות אחרי ההחלה מחדש");
+
+                // מחיקה (לא ביטול) של ספר שהוספנו, ואחריה החלפת קובץ: גם המחיקה צריכה לחזור.
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    var b = s.Db.LoadCatalog().Books[idB];
+                    s.Delete(s.Engine.PlanDelete(Intents.DeleteBooks(new[] { b }), new[] { idB }, null, progress), progress);
+                    Assert(!s.Db.LoadCatalog().Books.ContainsKey(idB), "ספר ב נמחק במחיקה רגילה");
+                }
+                File.WriteAllText(releasePath, "29990303000000");
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                    Assert(s.ReplacedOps == 0 && s.Status() == LibraryStatus.Edited, "שינוי גרסה בלבד אחרי מחיקת ספר שנוסף: הכול נשאר מוחל");
+                using (var db = SeforimDb.Open(dbPath, readOnly: false)) DeleteReservedRows(db);
+                File.WriteAllBytes(catalogPath, catalogBefore);
+                File.WriteAllText(releasePath, "29990404000000");
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    Assert(s.ReplacedOps == 4, $"זוהתה החלפת קובץ, כולל המחיקה של ספר שנוסף ({s.ReplacedOps} פעולות)");
+                    var res = s.ReapplyRestored(progress);
+                    foreach (var p in res.Problems) Log("  בעיה: " + p);
+                    Assert(res.Problems.Count == 0 && res.Applied == 4, $"הוחלו שוב 4 פעולות ({res.Applied})");
+                    var cat = s.Db.LoadCatalog();
+                    Assert(cat.Books.ContainsKey(idA) && !cat.Books.ContainsKey(idB) && cat.Categories.ContainsKey(newCat), "ספר א קיים, ספר ב נמחק שוב");
+                    var books = ZayitCatalog.ReadBooks(File.ReadAllBytes(catalogPath));
+                    Assert(books.ContainsKey(idA) && !books.ContainsKey(idB), "בקטלוג: ספר א בלבד");
+                }
+
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    var sourceB = s.Ops().First(o => o.Intent.Kind == OpIntent.AddBook && o.Intent.Books.Any(b => b.Id == idB)).Intent.AddBookSpec.SourceFile;
+                    s.UndoLast(progress);
+                    Assert(s.Db.LoadCatalog().Books.ContainsKey(idB), "ביטול המחיקה החזיר את ספר ב");
+                    s.UndoLast(progress);
+                    s.UndoLast(progress);
+                    Assert(!s.Db.LoadCatalog().Books.ContainsKey(idB) && !s.Db.LoadCatalog().Categories.ContainsKey(newCat), "ביטול הוספת ספר ב");
+                    Assert(!File.Exists(Path.Combine(s.AddedBooksFolder, sourceB)), "העותק של ספר ב נמחק אחרי הביטול");
+                    s.RestoreAll(progress);
+                    foreach (var op in s.Ops()) s.Store.DeleteOp(op.Id);
+                    Assert(NoReservedRows(s.Db), "אין שורות בטווח השמור בסוף");
+                }
+                File.WriteAllText(releasePath, releaseBefore);
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot)) { }
+                Assert(File.ReadAllBytes(catalogPath).SequenceEqual(catalogBefore), "קטלוג זית זהה למקור בסוף");
+                if (!quick)
+                {
+                    Log("מחשב טביעת אצבע מלאה בסוף…");
+                    Assert(FullFingerprint(dbPath) == h0, "הקובץ זהה למקור בסוף");
+                    using (var db = SeforimDb.Open(dbPath, readOnly: true))
+                        Assert(db.Scalar("PRAGMA quick_check") as string == "ok", "quick_check תקין");
+                }
+                Log($"הכול עבר. זמן כולל: {sw.Elapsed.TotalMinutes:N1} דקות");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Log("נכשל: " + ex);
+                return 1;
+            }
+        }
+
+        private static T Timed2<T>(string what, Func<T> f)
+        {
+            var result = default(T);
+            Timed(what, () => result = f());
+            return result;
+        }
+
+        /// <summary>בודק ספר שנוסף מול הטקסט, בלי להשתמש בקוד ההוספה עצמו לחישוב המבנה.</summary>
+        private static void VerifyAddedBook(SeforimDb db, long bookId, string title, BookText text, long categoryId, string editedTitle = null)
+        {
+            var row = new List<object>();
+            using (var cmd = db.Command("SELECT title, heRef, categoryId, totalLines, orderIndex FROM book WHERE id=$b", ("$b", bookId)))
+            using (var r = cmd.ExecuteReader())
+            {
+                Assert(r.Read(), $"הספר {bookId} קיים");
+                for (var i = 0; i < 5; i++) row.Add(r.GetValue(i));
+            }
+            Assert((string)row[0] == (editedTitle ?? title) && (string)row[1] == title && (long)row[2] == categoryId &&
+                   (long)row[3] == text.Lines.Count && (long)row[4] == 999, "שורת הספר");
+
+            var lines = new List<(long id, long index, string content, string heRef, long? toc, long chars)>();
+            using (var cmd = db.Command("SELECT id, lineIndex, content, heRef, tocEntryId, charCount FROM line WHERE bookId=$b ORDER BY lineIndex", ("$b", bookId)))
+            using (var r = cmd.ExecuteReader())
+                while (r.Read())
+                    lines.Add((r.GetInt64(0), r.GetInt64(1), r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3), r.IsDBNull(4) ? (long?)null : r.GetInt64(4), r.GetInt64(5)));
+            Assert(lines.Count == text.Lines.Count && lines.Select((l, i) => l.index == i && l.content == text.Lines[i]).All(x => x), "השורות זהות לטקסט ורצופות");
+
+            var toc = new Dictionary<long, (long? parent, long textId, long level, long? lineId, long last, long kids)>();
+            using (var cmd = db.Command("SELECT id, parentId, textId, level, lineId, isLastChild, hasChildren FROM tocEntry WHERE bookId=$b ORDER BY id", ("$b", bookId)))
+            using (var r = cmd.ExecuteReader())
+                while (r.Read())
+                    toc[r.GetInt64(0)] = (r.IsDBNull(1) ? (long?)null : r.GetInt64(1), r.GetInt64(2), r.GetInt64(3), r.IsDBNull(4) ? (long?)null : r.GetInt64(4), r.GetInt64(5), r.GetInt64(6));
+            var expectedHeadings = text.Lines.Where(l => BookImport.HeadingLevel(l) > 0 && SeforimDb.StripHtml(l).Length > 0).Count();
+            Assert(toc.Count == expectedHeadings && toc.Count == text.Headings, $"מספר הכותרות ({toc.Count})");
+
+            var lineToc = new Dictionary<long, long>();
+            using (var cmd = db.Command("SELECT lt.lineId, lt.tocEntryId FROM line_toc lt JOIN line l ON l.id=lt.lineId WHERE l.bookId=$b", ("$b", bookId)))
+            using (var r = cmd.ExecuteReader())
+                while (r.Read()) lineToc[r.GetInt64(0)] = r.GetInt64(1);
+
+            // מבנה צפוי, מחושב כאן בנפרד: לכל כותרת – האב הוא הכותרת האחרונה ברמה נמוכה יותר שעדיין "פתוחה".
+            var open = new List<(int level, long id)>();
+            long? owner = null;
+            var ok = true;
+            var problems = new List<string>();
+            for (var i = 0; i < lines.Count; i++)
+            {
+                var l = lines[i];
+                var level = BookImport.HeadingLevel(l.content);
+                var isHeading = level > 0 && SeforimDb.StripHtml(l.content).Length > 0;
+                if (l.chars != BookImport.VisibleChars(l.content)) { ok = false; problems.Add($"charCount בשורה {i}"); }
+                if (isHeading)
+                {
+                    var entry = l.toc ?? -1;
+                    if (!toc.TryGetValue(entry, out var e)) { ok = false; problems.Add($"אין כותרת לשורה {i}"); continue; }
+                    open.RemoveAll(o => o.level >= level);
+                    var parent = open.Count == 0 ? (long?)null : open[open.Count - 1].id;
+                    if (e.parent != parent || e.level != level || e.lineId != l.id || l.heRef != null) { ok = false; problems.Add($"מבנה הכותרת בשורה {i}"); }
+                    var tocText = db.Scalar("SELECT text FROM tocText WHERE id=$x", ("$x", e.textId)) as string;
+                    if (tocText != BookImport.HeadingText(l.content)) { ok = false; problems.Add($"טקסט הכותרת בשורה {i}"); }
+                    open.Add((level, entry));
+                    owner = entry;
+                }
+                else if (l.toc != null || l.heRef != title + " " + (i + 1)) { ok = false; problems.Add($"שורה רגילה {i}"); }
+                var mapped = lineToc.TryGetValue(l.id, out var m) ? m : (long?)null;
+                if (mapped != owner) { ok = false; problems.Add($"line_toc בשורה {i}"); }
+            }
+            foreach (var kv in toc)
+            {
+                var kids = toc.Any(x => x.Value.parent == kv.Key);
+                var siblings = toc.Where(x => x.Value.parent == kv.Value.parent).Select(x => x.Key).ToList();
+                if ((kv.Value.kids == 1) != kids || (kv.Value.last == 1) != (siblings.Max() == kv.Key)) { ok = false; problems.Add($"דגלי כותרת {kv.Key}"); }
+            }
+            foreach (var p in problems.Take(10)) Log("    ✘ " + p);
+            Assert(ok, $"מבנה השורות, תוכן העניינים ו-line_toc של \"{title}\"");
+            Assert(db.Scalar("SELECT 1 FROM book_has_links WHERE bookId=$b AND hasSourceLinks=0 AND hasTargetLinks=0", ("$b", bookId)) != null, "book_has_links");
+        }
+
+        private static void VerifyCatalog(string catalogPath, byte[] original, long idA, string titleA, long catA, long idB, long newCat, long parentOfNew)
+        {
+            var bytes = File.ReadAllBytes(catalogPath);
+            var books = ZayitCatalog.ReadBooks(bytes);
+            var before = ZayitCatalog.ReadBooks(original);
+            Assert(books.Count == before.Count + 2 && before.All(kv => books.ContainsKey(kv.Key)), "בקטלוג: כל הספרים המקוריים ועוד שניים");
+            Assert(books.TryGetValue(idA, out var t) && t == titleA && books.ContainsKey(idB), "בקטלוג: הספרים שנוספו");
+
+            // מבנה: ספר א בקטגוריה שלו, ספר ב בקטגוריה החדשה שבתוך האב הנכון, עם רמה ו-parentId.
+            var found = new Dictionary<long, (long cat, long? parentCat)>();
+            (long id, long? parent, long level, bool hasLevel) newInfo = (0, null, 0, false);
+            void Walk(byte[] cat, long? parent)
+            {
+                var fields = ParseProto(cat);
+                var id = (long)fields.First(f => f.num == 1).value;
+                if (id == newCat)
+                    newInfo = (id, fields.Where(f => f.num == 4).Select(f => (long?)f.value).FirstOrDefault(), (long)fields.First(f => f.num == 3).value, fields.Any(f => f.num == 3));
+                foreach (var f in fields.Where(f => f.num == 5))
+                    found[(long)ParseProto(f.bytes).First(x => x.num == 1).value] = (id, parent);
+                foreach (var f in fields.Where(f => f.num == 6)) Walk(f.bytes, id);
+            }
+            var root = ParseProto(bytes);
+            foreach (var f in root.Where(f => f.num == 1)) Walk(f.bytes, null);
+            Assert(found[idA].cat == catA, "בקטלוג: ספר א בקטגוריה הנכונה");
+            Assert(found[idB].cat == newCat && found[idB].parentCat == parentOfNew, "בקטלוג: ספר ב בקטגוריה החדשה, בתוך האב הנכון");
+            Assert(newInfo.hasLevel && newInfo.parent == parentOfNew, "בקטלוג: הקטגוריה החדשה עם רמה ואב");
+            Assert((long)root.First(f => f.num == 3).value == books.Count, "בקטלוג: מספר הספרים הכולל עודכן");
+        }
+
+        private static List<(int num, ulong value, byte[] bytes)> ParseProto(byte[] data)
+        {
+            var list = new List<(int, ulong, byte[])>();
+            var pos = 0;
+            ulong Varint()
+            {
+                ulong v = 0;
+                for (var shift = 0; ; shift += 7)
+                {
+                    var b = data[pos++];
+                    v |= (ulong)(b & 0x7F) << shift;
+                    if (b < 0x80) return v;
+                }
+            }
+            while (pos < data.Length)
+            {
+                var key = Varint();
+                var num = (int)(key >> 3);
+                switch (key & 7)
+                {
+                    case 0: list.Add((num, Varint(), null)); break;
+                    case 2:
+                        var len = (int)Varint();
+                        list.Add((num, 0, data.Skip(pos).Take(len).ToArray()));
+                        pos += len;
+                        break;
+                    case 5: list.Add((num, 0, data.Skip(pos).Take(4).ToArray())); pos += 4; break;
+                    case 1: list.Add((num, 0, data.Skip(pos).Take(8).ToArray())); pos += 8; break;
+                    default: throw new InvalidDataException("protobuf");
+                }
+            }
+            return list;
+        }
+
+        private static string ReservedWhere(string table)
+        {
+            switch (table)
+            {
+                case "line_toc": return "lineId >= 900000000";
+                case "line":
+                case "tocEntry":
+                case "book_has_links":
+                case "book_author": return "bookId >= 900000000";
+                case "category_closure": return "descendantId >= 900000000";
+                default: return "id >= 900000000";
+            }
+        }
+
+        private static bool NoReservedRows(SeforimDb db) =>
+            AddedTables.All(t => db.Scalar($"SELECT 1 FROM {t} WHERE {ReservedWhere(t)} LIMIT 1") == null) &&
+            db.Scalar("SELECT 1 FROM line WHERE id >= 900000000 LIMIT 1") == null &&
+            db.Scalar("SELECT 1 FROM tocEntry WHERE id >= 900000000 LIMIT 1") == null;
+
+        private static void DeleteReservedRows(SeforimDb db)
+        {
+            using (var tx = db.Begin())
+            {
+                foreach (var t in AddedTables) db.Exec($"DELETE FROM {t} WHERE {ReservedWhere(t)}");
+                tx.Commit();
+            }
+        }
+
+        private static long ForeignKeyViolations(string dbPath)
+        {
+            using (var db = SeforimDb.Open(dbPath, readOnly: true))
+            {
+                long n = 0;
+                foreach (var t in AddedTables)
+                    n += Convert.ToInt64(db.Scalar($"SELECT count(*) FROM pragma_foreign_key_check('{t}')"));
+                return n;
+            }
+        }
 
         private static int ApplyPatch(string dbPath, string manifestPath, string zstPath, bool checkFk, IProgress<string> progress)
         {

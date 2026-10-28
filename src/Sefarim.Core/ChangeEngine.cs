@@ -31,7 +31,7 @@ namespace Sefarim.Core
     /// מבצע שינויים בספרייה כך שאפשר להחזיר אותם בדיוק: לפני כל שינוי השורות
     /// המקוריות מועתקות למאגר הגיבוי עם טביעת אצבע, ובהחזרה נבדק שהתוכן זהה.
     /// </summary>
-    public sealed class ChangeEngine
+    public sealed partial class ChangeEngine
     {
         private readonly SeforimDb _db;
         private readonly BackupStore _store;
@@ -369,6 +369,7 @@ namespace Sefarim.Core
         /// </summary>
         public bool StillApplied(AppliedOp op)
         {
+            if (op.Intent?.Kind == OpIntent.AddBook) return AddedStillApplied(op);
             if (op.AfterHashes == null || op.AfterHashes.Count == 0) return false;
             using (var tx = _db.Begin())
             {
@@ -544,6 +545,8 @@ namespace Sefarim.Core
                 var actual = HashCurrent(op.Id, S[name]);
                 if (!op.Hashes.TryGetValue(name, out var expected) || actual != expected)
                     throw new InvalidOperationException($"הבדיקה נכשלה: התוכן שהוחזר לטבלה {name} אינו זהה למקור. שום דבר לא שונה.");
+                if (op.Intent?.Kind == OpIntent.AddBook && CountAdded(op.Id, S[name]) != 0)
+                    throw new InvalidOperationException($"הבדיקה נכשלה: לא כל השורות שנוספו לטבלה {name} הוסרו. שום דבר לא שונה.");
             }
         }
 
