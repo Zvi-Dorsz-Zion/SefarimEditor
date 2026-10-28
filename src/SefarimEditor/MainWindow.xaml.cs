@@ -206,6 +206,95 @@ namespace SefarimEditor
             BackupPath.Text = _cfg.BackupRoot ?? "";
             FillMethod();
             AddBookButton.Visibility = choice.Kind == LibraryKind.Zayit ? Visibility.Visible : Visibility.Collapsed;
+            FillSearchCard();
+        }
+
+        // ───────────────────────── החיפוש של זית (רכיב החיפוש) ─────────────────────────
+
+        private void FillSearchCard()
+        {
+            var zayit = _choice?.Kind == LibraryKind.Zayit;
+            SearchCard.Visibility = zayit ? Visibility.Visible : Visibility.Collapsed;
+            if (!zayit) return;
+            var installed = SearchAddon.IsInstalled;
+            SearchState.Text = installed
+                ? $"✔ רכיב החיפוש מותקן (גרסה {SearchAddon.Version})."
+                : "רכיב החיפוש לא מותקן.";
+            SearchState.Foreground = (Brush)FindResource(installed ? "Success" : "Muted");
+            SearchSyncCheck.IsEnabled = installed;
+            SearchSyncCheck.IsChecked = _settings.ZayitSearchSync;
+            SearchInstallButton.Visibility = installed ? Visibility.Collapsed : Visibility.Visible;
+            SearchInstallButton.Content = SearchAddon.ZipSize > 0 ? $"⬇  הורד את רכיב החיפוש ({SelfUpdater.Size(SearchAddon.ZipSize)})" : "⬇  הורד את רכיב החיפוש";
+            SearchNowButton.Visibility = installed ? Visibility.Visible : Visibility.Collapsed;
+            SearchRemoveButton.Visibility = installed && SearchAddon.IsRemovable ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        private void SearchSync_Click(object sender, RoutedEventArgs e)
+        {
+            _settings.ZayitSearchSync = SearchSyncCheck.IsChecked == true;
+            SaveSettings();
+        }
+
+        private async void SearchInstall_Click(object sender, RoutedEventArgs e) => await InstallSearchAddon(askFirst: true);
+
+        /// <summary>מוריד ומתקין את רכיב החיפוש. מחזיר true אם הוא מותקן בסוף.</summary>
+        private async Task<bool> InstallSearchAddon(bool askFirst)
+        {
+            if (SearchAddon.IsInstalled) return true;
+            if (askFirst && !Dialogs.Ask(this, "להוריד את רכיב החיפוש?",
+                    $"הרכיב יורד מדף התוכנה בגיטהאב ({Ltr(SelfUpdater.Size(SearchAddon.ZipSize))}), נבדק שהוא בדיוק הקובץ המקורי, ונשמר בתיקיית ההגדרות. אין צורך בהתקנה.",
+                    "הורד")) return false;
+            var progress = new Progress<string>(t => BusyText.Text = t);
+            var download = new Progress<(long done, long total)>(d =>
+                BusyText.Text = $"מוריד… {Ltr(SelfUpdater.Size(d.done))} מתוך {Ltr(SelfUpdater.Size(d.total))}");
+            ShowBusy("מתקין את רכיב החיפוש…", "");
+            try
+            {
+                await Task.Run(() => SearchAddon.Install(download, progress));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                HideBusy();
+                Dialogs.Error(this, "ההורדה לא הצליחה", ex.Message + "\n\n(אין חיבור לאינטרנט?)");
+                return false;
+            }
+            finally
+            {
+                HideBusy();
+                FillSearchCard();
+            }
+        }
+
+        private async void SearchNow_Click(object sender, RoutedEventArgs e) => await SyncSearchNow(showResult: true);
+
+        private async Task SyncSearchNow(bool showResult)
+        {
+            if (_choice?.Kind != LibraryKind.Zayit) return;
+            SearchSyncResult result = null;
+            var ok = await RunWrite("מעדכן את החיפוש של זית…", (s, p) => result = s.SyncSearch(p));
+            if (!ok || result == null || !showResult) return;
+            if (result.Warning != null) Dialogs.Error(this, "החיפוש לא עודכן", result.Warning);
+            else Dialogs.Info(this, "החיפוש של זית עודכן",
+                result.Changed
+                    ? $"נוספו לחיפוש {result.Added} ספרים, והוסרו ממנו {result.Removed}. בפתיחה הבאה של זית השינויים יופיעו בחיפוש."
+                    : "החיפוש כבר מעודכן, ולא היה צורך לשנות דבר.");
+        }
+
+        private void SearchRemove_Click(object sender, RoutedEventArgs e)
+        {
+            if (!Dialogs.Ask(this, "להסיר את רכיב החיפוש?",
+                    "הרכיב יימחק מהמחשב. מה שכבר נכתב לחיפוש של זית נשאר, אבל שינויים חדשים לא יגיעו לחיפוש עד שתוריד אותו שוב.",
+                    "הסר")) return;
+            try
+            {
+                SearchAddon.Uninstall();
+            }
+            catch (Exception ex)
+            {
+                Dialogs.Error(this, "ההסרה נכשלה", ex.Message);
+            }
+            FillSearchCard();
         }
 
         // ───────────────────────── שיטת העדכון ─────────────────────────
@@ -784,10 +873,21 @@ namespace SefarimEditor
                 BookList.SelectedItem = added;
                 ShowBook(added);
             }
-            Dialogs.Info(this, "הספר נוסף",
-                $"הספר \"{spec.Title}\" נוסף לזית. בפתיחה הבאה של זית הוא יופיע בעץ הספרים.\n\n" +
-                "הספר לא יופיע בתוצאות החיפוש של זית. אפשר לבטל את ההוספה בלשונית \"שינויים ועדכונים\" (\"בטל את השינוי האחרון\"), " +
-                "או למחוק את הספר כמו כל ספר אחר.");
+            var undo = "אפשר לבטל את ההוספה בלשונית \"שינויים ועדכונים\" (\"בטל את השינוי האחרון\"), או למחוק את הספר כמו כל ספר אחר.";
+            if (SearchAddon.IsInstalled && _settings.ZayitSearchSync && _lastSearchWarning == null)
+            {
+                Dialogs.Info(this, "הספר נוסף",
+                    $"הספר \"{spec.Title}\" נוסף לזית, גם לחיפוש. בפתיחה הבאה של זית הוא יופיע בעץ הספרים ובתוצאות החיפוש.\n\n" + undo);
+                return;
+            }
+            Dialogs.Info(this, "הספר נוסף", $"הספר \"{spec.Title}\" נוסף לזית. בפתיחה הבאה של זית הוא יופיע בעץ הספרים.\n\n" + undo);
+            if (SearchAddon.IsInstalled || SearchAddon.ZipSize <= 0) return;
+            if (!Dialogs.Ask(this, "להוסיף את הספר גם לחיפוש של זית?",
+                    $"כדי שהספר יימצא גם בחיפוש של זית, צריך להוריד פעם אחת את רכיב החיפוש ({Ltr(SelfUpdater.Size(SearchAddon.ZipSize))}). " +
+                    "הוא יורד מדף התוכנה בגיטהאב, נבדק שהוא בדיוק הקובץ המקורי, ומאז מעדכן את החיפוש של זית אחרי כל שינוי – " +
+                    "כולל הסרה מהחיפוש של ספרים שמחקת.",
+                    "הורד והוסף לחיפוש", "לא עכשיו")) return;
+            if (await InstallSearchAddon(askFirst: false)) await SyncSearchNow(showResult: true);
         }
 
         // ───────────────────────── עריכת קטגוריה ─────────────────────────
@@ -890,7 +990,10 @@ namespace SefarimEditor
                              (_cfg.ReleaseBackupAfterUpdate ? " (אוטומטית, בעדכון הספרייה הבא)." : " (בלחיצה על \"פנה את גיבוי המחיקות\", או בעדכון הספרייה).")
                            : $"\n\nהכול נשמר קודם בתיקיית הגיבוי ({Ltr(root)}), ואפשר להחזיר בכל עת.");
             if (_choice.Kind == LibraryKind.Zayit)
-                text += "\n\nשים לב: בזית הספרים יוסרו גם מעץ הספרים, אבל ייתכן שימשיכו להופיע בתוצאות החיפוש, כי לזית יש אינדקס חיפוש נפרד.";
+                text += SearchAddon.IsInstalled && _settings.ZayitSearchSync
+                    ? "\n\nבזית הספרים יוסרו גם מעץ הספרים וגם מתוצאות החיפוש."
+                    : "\n\nשים לב: בזית הספרים יוסרו גם מעץ הספרים, אבל ייתכן שימשיכו להופיע בתוצאות החיפוש, כי לזית יש אינדקס חיפוש נפרד. " +
+                      "רכיב החיפוש (בלשונית \"הגדרות\") יכול להסיר אותם גם משם.";
             if (_choice.Kind == LibraryKind.Otzaria)
                 text += "\n\nייתכן שהספרים ימשיכו להופיע בתוצאות החיפוש של אוצריא עד לבניית אינדקס החיפוש מחדש.";
             return text;
@@ -1103,6 +1206,9 @@ namespace SefarimEditor
             return true;
         }
 
+        /// <summary>האזהרה של סנכרון החיפוש בפעולת הכתיבה האחרונה (null = עודכן, או שלא היה צורך).</summary>
+        private string _lastSearchWarning;
+
         private async Task<bool> RunWrite(string busy, Func<LibrarySession, IProgress<string>, object> action, bool needsBackup = true)
         {
             if (!EnsureCanWrite(needsBackup)) return false;
@@ -1111,6 +1217,7 @@ namespace SefarimEditor
             var ok = false;
             var choice = _choice;
             var root = _cfg.ResolveBackupRoot();
+            string searchWarning = null;
             try
             {
                 _ro?.Dispose();
@@ -1131,6 +1238,7 @@ namespace SefarimEditor
                     {
                         action(s, progress);
                         _settings.Mirror(_cfg, s);
+                        searchWarning = s.LastSearchSync?.Warning;
                     }
                 });
                 SaveSettings();
@@ -1146,6 +1254,11 @@ namespace SefarimEditor
                 HideBusy();
             }
             await Reload();
+            _lastSearchWarning = searchWarning;
+            // השינוי עצמו נשמר; רק החיפוש של זית לא עודכן (הסנכרון הבא ישלים).
+            if (ok && searchWarning != null)
+                Dialogs.Info(this, "החיפוש של זית לא עודכן",
+                    searchWarning + "\n\nהשינוי עצמו נשמר בקובץ. אפשר לנסות שוב בלשונית \"הגדרות\" › \"עדכן את החיפוש עכשיו\".");
             if (ok) OfferBackgroundProcess();
             return ok;
         }

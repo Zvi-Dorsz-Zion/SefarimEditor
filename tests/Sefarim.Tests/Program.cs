@@ -108,6 +108,30 @@ namespace Sefarim.Tests
             // --add-book: הוספת ספרים לעותק של ספריית זית, ביטול, החזרה למקור, החלה מחדש והחלפת קובץ מדומה
             if (args.Contains("--add-book")) return AddBookTest(dbPath, backupRoot, quick, progress);
 
+            // --install-addon <zip>: פריסת רכיב החיפוש מקובץ zip לתיקיית ההגדרות (SEFARIM_SETTINGS_DIR) ובדיקה שהוא רץ
+            var installAddon = Array.IndexOf(args, "--install-addon");
+            if (installAddon >= 0)
+            {
+                SearchAddon.InstallFromZip(args[installAddon + 1], progress);
+                Log($"  ✔ הותקן ב-{SearchAddon.Find()}, ניתן להסרה: {SearchAddon.IsRemovable}");
+                return 0;
+            }
+
+            // --download-addon: הורדה אמיתית של רכיב החיפוש מגיטהאב, אימות ופריסה לתיקיית ההגדרות (SEFARIM_SETTINGS_DIR)
+            if (args.Contains("--download-addon"))
+            {
+                SearchAddon.Install(new SyncProgress2(d => { }), progress);
+                Log($"  ✔ הורד, אומת והותקן ב-{SearchAddon.Find()}");
+                return 0;
+            }
+
+            // --search-probe N: הנרמול שלנו מול האינדקס הרשמי, על N שורות רשמיות (קריאה בלבד; SEFARIM_ADDON_DIR חובה)
+            var probe = Array.IndexOf(args, "--search-probe");
+            if (probe >= 0) return SearchProbe(dbPath, int.Parse(args[probe + 1]));
+
+            // --search-test: רכיב החיפוש על עותק של זית (כולל האינדקס): הוספה, מחיקה, ביטול, החלפה (SEFARIM_ADDON_DIR חובה)
+            if (args.Contains("--search-test")) return SearchTest(dbPath, backupRoot, progress);
+
             try
             {
                 var sw = Stopwatch.StartNew();
@@ -234,6 +258,13 @@ namespace Sefarim.Tests
             }
         }
 
+        private sealed class SyncProgress2 : IProgress<(long done, long total)>
+        {
+            private readonly Action<(long, long)> _a;
+            public SyncProgress2(Action<(long, long)> a) => _a = a;
+            public void Report((long done, long total) value) => _a(value);
+        }
+
         private sealed class SyncProgress : IProgress<string>
         {
             private readonly Action<string> _a;
@@ -263,6 +294,186 @@ namespace Sefarim.Tests
         }
 
         private static void Log(string s) => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {s}");
+
+        // ───────────────────────── רכיב החיפוש (זית) ─────────────────────────
+
+        private static (int code, string output) Addon(string command, Action<StreamWriter> input = null)
+        {
+            var (code, output, error) = SearchAddon.Run(command, input == null ? (Action<Stream>)null : s =>
+            {
+                using (var w = new StreamWriter(s, new UTF8Encoding(false)) { NewLine = "\n" }) input(w);
+            }, TimeSpan.FromMinutes(60));
+            if (error.Length > 0) Log("  stderr: " + error.Split('\n').FirstOrDefault());
+            return (code, output);
+        }
+
+        private static string Quote(string path) => "\"" + Path.GetFullPath(path) + "\"";
+
+        private static int SearchProbe(string dbPath, int count)
+        {
+            using (var db = SeforimDb.Open(dbPath, readOnly: true))
+            {
+                var max = Convert.ToInt64(db.Scalar("SELECT max(id) FROM line WHERE id < 900000000"));
+                var rnd = new Random(12345);
+                var picked = new List<(long id, int index, string text)>();
+                // שורות מפוזרות בכל הספרייה, ועוד שורות עם תגיות, ישויות וניקוד.
+                for (var i = 0; i < count; i++)
+                {
+                    using (var cmd = db.Command("SELECT id, lineIndex, content FROM line WHERE id >= $x ORDER BY id LIMIT 1", ("$x", (long)(rnd.NextDouble() * max))))
+                    using (var r = cmd.ExecuteReader())
+                        if (r.Read()) picked.Add((r.GetInt64(0), r.GetInt32(1), r.GetString(2)));
+                }
+                foreach (var like in new[] { "%&%;%", "%<span%", "%<br%", "%־%", "%״%", "%<%<%>%" })
+                    using (var cmd = db.Command("SELECT id, lineIndex, content FROM line WHERE content LIKE $l AND id < 900000000 LIMIT 40", ("$l", like)))
+                    using (var r = cmd.ExecuteReader())
+                        while (r.Read()) picked.Add((r.GetInt64(0), r.GetInt32(1), r.GetString(2)));
+                Log($"בודק {picked.Count:N0} שורות רשמיות מול האינדקס…");
+                var (code, output) = Addon("probe", w =>
+                {
+                    w.WriteLine("INDEX\t" + Path.GetFullPath(ZayitSearch.IndexDir(dbPath)));
+                    foreach (var p in picked) w.WriteLine($"LINE\t{p.id}\t{p.index}\t{ZayitSearch.NormalizeForIndex(p.text).Replace('\t', ' ')}");
+                });
+                foreach (var l in output.Split('\n').Where(l => l.Trim().Length > 0).Take(40)) Log("  " + l.Trim());
+                Log(code == 0 ? "  ✔ הנרמול זהה לאינדקס הרשמי" : "  ✘ יש הבדלים");
+                return code;
+            }
+        }
+
+        private static Dictionary<string, int> Counts(string dbPath, params long[] books)
+        {
+            var (code, output) = Addon("count --index " + Quote(ZayitSearch.IndexDir(dbPath)) + " --lookup " + Quote(ZayitSearch.LookupDir(dbPath)) +
+                                       string.Concat(books.Select(b => " --book " + b)));
+            if (code != 0) throw new Exception("count נכשל: " + output);
+            var result = new Dictionary<string, int>();
+            foreach (var line in output.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("book ")))
+            {
+                var parts = line.Split(' ');
+                foreach (var kv in parts.Skip(2).Select(p => p.Split('=')))
+                    result[parts[1] + ":" + kv[0]] = int.Parse(kv[1]);
+            }
+            return result;
+        }
+
+        private static int Hits(string dbPath, string term, long? book = null)
+        {
+            var (code, output) = Addon("search --index " + Quote(ZayitSearch.IndexDir(dbPath)) + " --term " + term + (book.HasValue ? " --book " + book : ""));
+            if (code != 0) throw new Exception("search נכשל: " + output);
+            var line = output.Split('\n').First(l => l.StartsWith("hits="));
+            return int.Parse(new string(line.Substring(5).TakeWhile(char.IsDigit).ToArray()));
+        }
+
+        private static int SearchTest(string dbPath, string backupRoot, IProgress<string> progress)
+        {
+            try
+            {
+                var sw = Stopwatch.StartNew();
+                Assert(SearchAddon.IsInstalled, "רכיב החיפוש נמצא");
+                var (vcode, vout) = Addon("version");
+                Log("  " + vout.Trim());
+                var lines = new[]
+                {
+                    "<h1>ספר בדיקת חיפוש</h1>",
+                    "<h2>פרק א</h2>",
+                    "המילה המיוחדת זזזקקקווו נמצאת כאן בְּנִקּוּד",
+                    "ועוד שורה עם מילה ייחודית שנייה ששששטטטם",
+                };
+                var bytes = Encoding.UTF8.GetBytes(string.Join("\n", lines));
+                long added, official;
+                CategoryNode target;
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    var cat = s.Db.LoadCatalog();
+                    target = cat.Categories.Values.Where(c => c.Books.Count >= 3 && c.Parent != null).OrderBy(c => c.Id).First();
+                    var spec = new AddBookSpec { Title = "ספר בדיקת חיפוש", Category = CategoryRef.Of(target) };
+                    Timed("הוספת ספר + עדכון החיפוש", () => s.AddBook(spec, bytes, progress));
+                    added = spec.BookId.Value;
+                    Log($"  סנכרון: נוספו {s.LastSearchSync?.Added}, הוסרו {s.LastSearchSync?.Removed}, אזהרה: {s.LastSearchSync?.Warning ?? "אין"}");
+                    Assert(s.LastSearchSync != null && s.LastSearchSync.Warning == null && s.LastSearchSync.Added == 1, "הספר נשלח לחיפוש");
+                }
+                var c1 = Counts(dbPath, added);
+                Assert(c1[added + ":lines"] == lines.Length && c1[added + ":titles"] == 1 && c1[added + ":lookup"] == 1, $"באינדקס: {lines.Length} שורות, שם ומסמך בחיפוש השמות");
+                Assert(Hits(dbPath, "זזזקקקווו") == 1, "מילה מהספר נמצאת בחיפוש");
+                Assert(Hits(dbPath, "ששששטטטמ") == 1, "מילה שנייה נמצאת (אות סופית מנורמלת לרגילה, כמו בזית)");
+                Assert(Hits(dbPath, "בנקוד", added) == 1, "מילה עם ניקוד נמצאת בלי ניקוד");
+
+                // מחיקת ספר רשמי – יוצא מהחיפוש; ביטול – חוזר.
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    var b = s.Db.LoadCatalog().Books.Values.Where(x => x.TotalLines > 20 && x.TotalLines < 200).OrderBy(x => x.Id).Skip(5).First();
+                    official = b.Id;
+                    var before = Counts(dbPath, official);
+                    Log($"  ספר רשמי \"{b.Title}\" ({b.TotalLines} שורות): באינדקס {before[official + ":lines"]} שורות");
+                    Assert(before[official + ":lines"] == b.TotalLines, "הספר הרשמי באינדקס לפני המחיקה");
+                    s.Delete(s.Engine.PlanDelete(Intents.DeleteBooks(new[] { b }), new[] { official }, null, progress), progress);
+                    Assert(s.LastSearchSync?.Warning == null && s.LastSearchSync?.Removed == 1, "המחיקה נשלחה לחיפוש");
+                }
+                var c2 = Counts(dbPath, official, added);
+                Assert(c2[official + ":lines"] == 0 && c2[official + ":titles"] == 0 && c2[official + ":lookup"] == 0, "הספר שנמחק יצא מהחיפוש");
+                Assert(c2[added + ":lines"] == lines.Length, "הספר שנוסף עדיין בחיפוש");
+
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    s.UndoLast(progress);
+                    Assert(s.LastSearchSync?.Warning == null && s.LastSearchSync?.Added == 1, "ביטול המחיקה נשלח לחיפוש");
+                    var total = s.Db.LoadCatalog().Books[official].TotalLines;
+                    var c3 = Counts(dbPath, official);
+                    Assert(c3[official + ":lines"] == total && c3[official + ":lookup"] == 1, "הספר הרשמי חזר לחיפוש");
+                }
+
+                // אין שינוי – אין כתיבה.
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    var r = s.SyncSearch(progress);
+                    Assert(r.Warning == null && !r.Changed, "סנכרון חוזר בלי שינויים לא כותב כלום");
+                    // שינוי שם – הספר נכתב מחדש עם השם החדש.
+                    var book = s.Db.LoadCatalog().Books[added];
+                    var ch = new BookChanges { Title = "ספר בדיקת חיפוש (נערך)" };
+                    s.EditBook(Intents.EditBook(book, ch), added, ch, progress);
+                    Assert(s.LastSearchSync?.Added == 1, "שינוי שם נשלח לחיפוש");
+                }
+                Assert(Counts(dbPath, added)[added + ":lines"] == lines.Length, "אחרי שינוי השם – אותו מספר שורות (בלי כפילויות)");
+
+                // ביטול הכול: הספר שנוסף יוצא מהחיפוש.
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    s.RestoreAll(progress);
+                    Assert(s.LastSearchSync?.Warning == null && s.LastSearchSync?.Removed == 1, "החזרה למקור נשלחה לחיפוש");
+                }
+                var c4 = Counts(dbPath, added);
+                Assert(c4[added + ":lines"] == 0 && c4[added + ":lookup"] == 0, "הספר שנוסף יצא מהחיפוש");
+                Assert(Hits(dbPath, "זזזקקקווו") == 0, "המילה כבר לא נמצאת");
+
+                // החלה מחדש – הספר חוזר (וגם השם הערוך).
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    var res = s.ReapplyRestored(progress);
+                    Assert(res.Problems.Count == 0 && s.LastSearchSync?.Warning == null, "החלה מחדש + חיפוש");
+                }
+                Assert(Counts(dbPath, added)[added + ":lines"] == lines.Length && Hits(dbPath, "זזזקקקווו") == 1, "הספר חזר לחיפוש");
+
+                // שלמות האינדקס (הקטעים החדשים בלבד; הקטע הגדול לא נכתב).
+                var (scode, segs) = Addon("segments --index " + Quote(ZayitSearch.IndexDir(dbPath)));
+                foreach (var l in segs.Split('\n').Where(l => l.Trim().Length > 0)) Log("  " + l.Trim());
+                var small = segs.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("_") && !l.StartsWith("_39 ")).Select(l => l.Split(' ')[0]).ToList();
+                var (ccode, cout) = Addon("check --index " + Quote(ZayitSearch.IndexDir(dbPath)) + string.Concat(small.Select(x => " --segment " + x)));
+                Assert(ccode == 0 && cout.Contains("CLEAN"), $"CheckIndex על {small.Count} הקטעים החדשים");
+
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Zayit, dbPath, backupRoot))
+                {
+                    s.RestoreAll(progress);
+                    foreach (var op in s.Ops()) s.Store.DeleteOp(op.Id);
+                    s.SyncSearch(progress);
+                }
+                Assert(Counts(dbPath, added)[added + ":lines"] == 0, "בסוף: הספר שנוסף לא בחיפוש");
+                Log($"הכול עבר. זמן כולל: {sw.Elapsed.TotalMinutes:N1} דקות");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Log("נכשל: " + ex);
+                return 1;
+            }
+        }
 
         // ───────────────────────── הוספת ספרים (זית) ─────────────────────────
 

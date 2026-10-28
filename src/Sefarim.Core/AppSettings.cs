@@ -101,6 +101,9 @@ namespace Sefarim.Core
 
         public CheckMode CheckMode { get; set; } = CheckMode.LikeOtzaria;
 
+        /// <summary>כשרכיב החיפוש מותקן: לעדכן את החיפוש של זית אחרי כל שינוי (ספרים שנוספו ושנמחקו).</summary>
+        public bool ZayitSearchSync { get; set; } = true;
+
         /// <summary>
         /// האם לבדוק עדכונים עכשיו לפי ההגדרה. "כמו באוצריא" קורא את ההגדרות שלה (לקריאה בלבד);
         /// אם אי אפשר לקרוא אותן – בודקים, כי בדיקה לעולם לא מעדכנת בלי לשאול.

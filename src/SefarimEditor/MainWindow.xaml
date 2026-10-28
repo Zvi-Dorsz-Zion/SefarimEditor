@@ -278,6 +278,23 @@
                                 </StackPanel>
                             </Border>
 
+                            <Border x:Name="SearchCard" Style="{StaticResource Card}" Margin="0,0,0,12" Visibility="Collapsed">
+                                <StackPanel>
+                                    <TextBlock Text="החיפוש של זית" Style="{StaticResource H2}"/>
+                                    <TextBlock Style="{StaticResource MutedText}" LineHeight="21"
+                                               Text="לזית יש אינדקס חיפוש נפרד מהקובץ. רכיב החיפוש (תוספת שמורידים פעם אחת, כ-30MB) מוסיף אליו את הספרים שהוספת, ומסיר ממנו את הספרים שמחקת. בלעדיו, ספר שהוספת לא יימצא בחיפוש, וספר שמחקת עשוי להמשיך להופיע בתוצאות."/>
+                                    <TextBlock x:Name="SearchState" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                    <CheckBox x:Name="SearchSyncCheck" Content="עדכן את החיפוש של זית אוטומטית אחרי כל שינוי" Margin="0,10,0,0" Click="SearchSync_Click"/>
+                                    <WrapPanel Margin="0,10,0,0">
+                                        <Button x:Name="SearchInstallButton" Content="⬇  הורד את רכיב החיפוש" Style="{StaticResource PrimaryButton}" Click="SearchInstall_Click"/>
+                                        <Button x:Name="SearchNowButton" Content="🔍  עדכן את החיפוש עכשיו" Click="SearchNow_Click"/>
+                                        <Button x:Name="SearchRemoveButton" Content="הסר את הרכיב" Click="SearchRemove_Click"/>
+                                    </WrapPanel>
+                                    <TextBlock Style="{StaticResource MutedText}" LineHeight="20" Margin="0,8,0,0"
+                                               Text="ספר שנוסף יימצא בחיפוש הרגיל (מילים, ביטויים, חלקי מילה), אבל לא בחיפוש &quot;לפי משמעות&quot;. ספר שמחיקתו בוטלה חוזר לחיפוש הרגיל, ולחיפוש לפי משמעות רק בעדכון הבא של זית."/>
+                                </StackPanel>
+                            </Border>
+
                             <Border Style="{StaticResource Card}" Margin="0,0,0,12">
                                 <StackPanel>
                                     <TextBlock Text="תהליך רקע" Style="{StaticResource H2}"/>

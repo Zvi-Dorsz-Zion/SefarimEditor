@@ -157,6 +157,27 @@ namespace Sefarim.Core
             if (Kind != LibraryKind.Zayit || BackupRoot == null) return;
             progress?.Report("מעדכן את רשימת הספרים של זית…");
             ZayitCatalog.Sync(this, BackupRoot);
+            if (AppSettings.Load().ZayitSearchSync && SearchAddon.IsInstalled) SyncSearch(progress);
+        }
+
+        /// <summary>תוצאת סנכרון החיפוש האחרון בחיבור הזה (null = לא רץ).</summary>
+        public SearchSyncResult LastSearchSync { get; private set; }
+
+        /// <summary>
+        /// מעדכן את אינדקס החיפוש של זית (רכיב החיפוש). כשל כאן לא מבטל את השינוי בקובץ: הוא נרשם כאזהרה,
+        /// והסנכרון הבא ישלים את מה שחסר.
+        /// </summary>
+        public SearchSyncResult SyncSearch(IProgress<string> progress = null)
+        {
+            try
+            {
+                LastSearchSync = ZayitSearch.Sync(this, progress);
+            }
+            catch (Exception ex)
+            {
+                LastSearchSync = new SearchSyncResult { Warning = "עדכון החיפוש של זית נכשל: " + ex.Message };
+            }
+            return LastSearchSync;
         }
 
         /// <summary>פתיחה לעיון בלבד. אם תיקיית הגיבוי זמינה, גם רשימת השינויים נקראת ממנה.</summary>
