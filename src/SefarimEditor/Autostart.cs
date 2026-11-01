@@ -17,8 +17,12 @@ namespace SefarimEditor
             using (var key = Registry.CurrentUser.OpenSubKey(RunKey)) return key?.GetValue(ValueName) is string;
         }
 
+        /// <summary>בבדיקות (תיקיית הגדרות חלופית) לא נוגעים ברשומת ההפעלה האמיתית של המשתמש.</summary>
+        private static bool TestMode => !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("SEFARIM_SETTINGS_DIR"));
+
         public static void Set(bool enabled)
         {
+            if (TestMode) return;
             using (var key = Registry.CurrentUser.CreateSubKey(RunKey))
             {
                 if (enabled) key.SetValue(ValueName, Command);
@@ -29,6 +33,7 @@ namespace SefarimEditor
         /// <summary>מעדכן את הנתיב אם התוכנה הועברה למקום אחר.</summary>
         public static void RefreshPathIfEnabled()
         {
+            if (TestMode) return;
             using (var key = Registry.CurrentUser.OpenSubKey(RunKey, writable: true))
             {
                 if (key?.GetValue(ValueName) is string current && current != Command) key.SetValue(ValueName, Command);

@@ -172,6 +172,9 @@ namespace SefarimEditor
                 if (now == _running[kind]) continue;
                 _running[kind] = now;
                 Evaluate(kind, now ? Trigger.AppStarted : Trigger.AppClosed);
+                // אוצריא נסגרה: זה הרגע להציע עדכון, ולכן מוודאים שהמידע על הגרסה האחרונה טרי (עד חצי שעה).
+                // אם תוצא גרסה חדשה, הבדיקה מסתיימת בהערכה מחדש ובשאלה.
+                if (kind == LibraryKind.Otzaria && !now) MaybeCheckReleases(force: false, maxAge: TimeSpan.FromMinutes(30));
             }
         }
 
@@ -565,7 +568,12 @@ namespace SefarimEditor
             });
         }
 
-        private void MaybeCheckReleases(bool force, bool report = false)
+        private bool _checking;
+        private int _checkFailures;
+        private System.Windows.Forms.Timer _retryTimer;
+
+        /// <param name="maxAge">בדיקה רק אם הבדיקה האחרונה ישנה מזה (ברירת מחדל: CheckHours).</param>
+        private void MaybeCheckReleases(bool force, bool report = false, TimeSpan? maxAge = null)
         {
             var settings = AppSettings.Load();
             // בודקים רק כשיש בכלל ספריית אוצריא ערוכה שעוקבים אחריה.
@@ -573,18 +581,31 @@ namespace SefarimEditor
             if (!force && !relevant) return;
             // "אף פעם" / "כמו באוצריא" כשבאוצריא העדכונים כבויים: רק בדיקה שהמשתמש ביקש.
             if (!force && !settings.ShouldCheckUpdates()) return;
-            if (!force && settings.LastReleaseCheck > DateTime.Now.AddHours(-Math.Max(1, settings.CheckHours))) return;
-            Task.Run(() => ReleaseChecker.LatestOtzaria()).ContinueWith(t =>
+            var age = maxAge ?? TimeSpan.FromHours(Math.Max(1, settings.CheckHours));
+            if (!force && settings.LastReleaseCheck > DateTime.Now - age) return;
+            if (_checking) return;
+            _checking = true;
+            var etag = ReleaseChecker.ETagFor(settings);
+            Task.Run(() => ReleaseChecker.CheckOtzaria(etag)).ContinueWith(t =>
             {
                 _ui.BeginInvoke(new Action(() =>
                 {
-                    var latest = t.Result;
+                    _checking = false;
+                    var r = t.IsFaulted ? new ReleaseCheckResult { Error = t.Exception?.GetBaseException().Message } : t.Result;
                     var st = AppSettings.Load();
+                    var latest = ReleaseChecker.Store(st, r);
                     if (latest != null)
                     {
-                        st.LatestOtzariaRelease = latest;
-                        st.LastReleaseCheck = DateTime.Now;
                         st.Save();
+                        _checkFailures = 0;
+                        if (r.NotModified) Log($"בדיקת עדכון: אין שינוי (גרסה אחרונה {latest})");
+                        else Log($"בדיקת עדכון: הגרסה האחרונה {latest}");
+                    }
+                    else
+                    {
+                        // בלי זה כישלון נראה כמו "אין עדכון". רושמים, ומנסים שוב בעוד כמה דקות.
+                        Log("בדיקת עדכון נכשלה: " + (r.Error ?? "לא ידוע"));
+                        ScheduleRetry(r.RetryAfter);
                     }
                     if (report)
                     {
@@ -598,6 +619,31 @@ namespace SefarimEditor
                     EvaluateAll(report ? Trigger.Manual : Trigger.ReleaseChecked);
                 }));
             });
+        }
+
+        /// <summary>
+        /// ניסיון חוזר אחרי בדיקה שנכשלה: אחרי 3, 6, 9… דקות (עד 5 פעמים), או כשמכסת גיטהאב מתחדשת.
+        /// אחר כך – הבדיקה הקבועה (כל 15 דקות היא בודקת שוב, כי זמן הבדיקה האחרונה לא התעדכן).
+        /// </summary>
+        private void ScheduleRetry(DateTime? retryAfter)
+        {
+            if (_retryTimer != null || ++_checkFailures > 5) return;
+            var delay = retryAfter.HasValue
+                ? retryAfter.Value - DateTime.Now + TimeSpan.FromSeconds(30)
+                : TimeSpan.FromMinutes(3 * _checkFailures);
+            if (delay < TimeSpan.FromMinutes(1)) delay = TimeSpan.FromMinutes(1);
+            if (delay > TimeSpan.FromMinutes(65)) delay = TimeSpan.FromMinutes(65);
+            if (Fast) delay = TimeSpan.FromSeconds(3);
+            Log($"ניסיון חוזר לבדיקת עדכון בעוד {Math.Round(delay.TotalMinutes)} דקות");
+            _retryTimer = new System.Windows.Forms.Timer { Interval = (int)delay.TotalMilliseconds };
+            _retryTimer.Tick += (s, e) =>
+            {
+                _retryTimer.Stop();
+                _retryTimer.Dispose();
+                _retryTimer = null;
+                MaybeCheckReleases(force: false, maxAge: TimeSpan.Zero);
+            };
+            _retryTimer.Start();
         }
 
         // ───────────────────────── חלון שאלה ─────────────────────────

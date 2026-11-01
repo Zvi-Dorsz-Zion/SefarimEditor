@@ -117,6 +117,20 @@ namespace Sefarim.Tests
                 return 0;
             }
 
+            // --latest: הגרסה האחרונה של ספריית אוצריא לפי ReleaseChecker (כמו בתהליך הרקע)
+            if (args.Contains("--latest"))
+            {
+                // בדיקה רגילה, ואחריה בקשה מותנית עם ה-ETag – שאמורה לקבל "לא השתנה" (304), שלא נספר במכסה.
+                var first = ReleaseChecker.CheckOtzaria(null);
+                Log($"בדיקה: גרסה {first.Latest?.ToString() ?? "null"}, שגיאה: {first.Error ?? "אין"}, ETag: {(first.ETag == null ? "אין" : "יש")}");
+                if (first.Error != null || first.ETag == null) return 1;
+                var second = ReleaseChecker.CheckOtzaria(first.ETag);
+                Log($"בקשה מותנית: לא השתנה = {second.NotModified}, שגיאה: {second.Error ?? "אין"}");
+                var st = new AppSettings { LatestOtzariaRelease = first.Latest, OtzariaReleasesETag = first.ETag };
+                Log($"שמירה: {ReleaseChecker.Store(st, second)} (צפוי {first.Latest})");
+                return second.NotModified && second.Error == null && ReleaseChecker.Store(st, second) == first.Latest ? 0 : 1;
+            }
+
             // --download-addon: הורדה אמיתית של רכיב החיפוש מגיטהאב, אימות ופריסה לתיקיית ההגדרות (SEFARIM_SETTINGS_DIR)
             if (args.Contains("--download-addon"))
             {

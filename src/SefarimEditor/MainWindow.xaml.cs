@@ -83,12 +83,17 @@ namespace SefarimEditor
             Loaded += async (s, e) =>
             {
                 await InitLibraries();
-                // אם תהליך הרקע הוגדר לעלות עם Windows אבל לא רץ כרגע, מפעילים אותו.
+                // במצב צילום (בדיקות) לא נוגעים בהפעלה עם Windows ובתהליך הרקע: אחרת הרשומה תצביע על עותק הבדיקה.
+                if (SnapshotMode) return;
+                // אם תהליך הרקע הוגדר לעלות עם Windows אבל לא רץ כרגע, מפעילים אותו. וגם מתקנים את רשומת
+                // ההפעלה עם Windows, אם התוכנה הועברה או שינתה שם (אחרת Windows מדלגת עליה בשקט).
                 try
                 {
+                    Autostart.RefreshPathIfEnabled();
                     if (Autostart.IsEnabled() && !TrayLauncher.IsRunning()) TrayLauncher.Start();
                 }
                 catch (Exception ex) { Debug.WriteLine(ex); }
+                CheckLatestInBackground();
             };
             Closed += (s, e) => _ro?.Dispose();
             _runningTimer.Start();
@@ -96,6 +101,9 @@ namespace SefarimEditor
 
         /// <summary>מצב בדיקה: לגלול את הלשונית עד הסוף לפני הצילום.</summary>
         internal bool SnapshotScrollToEnd { get; set; }
+
+        /// <summary>מצב צילום (בדיקות): בלי תהליך רקע, בלי רשומת הפעלה ובלי בדיקה ברשת.</summary>
+        internal bool SnapshotMode { get; set; }
 
         /// <summary>מצב בדיקה: מכין מצב תצוגה, מצייר את החלון לקובץ PNG ונסגר.</summary>
         internal async Task Snapshot(string path, int tab, long? category, long? book, string search)
@@ -495,6 +503,15 @@ namespace SefarimEditor
                 ShowBanner($"תיקיית הגיבוי לא זמינה ({Ltr(_cfg.BackupRoot)}). אם היא בכרטיס זיכרון, חבר אותו.", "בדוק שוב", RefreshStatus);
             else if (_status == LibraryStatus.WaitingReapply)
                 ShowBanner("השינויים שלך הוחזרו (למשל לקראת עדכון) ועדיין לא הוחלו שוב.", "החל עכשיו", () => Reapply_Click(null, null));
+            else if (NewerOtzariaRelease(version) is long latest)
+                ShowBanner(_cfg.SelfUpdating
+                        ? $"יצאה גרסת ספרייה חדשה לאוצריא ({latest}; אצלך {version}). כדאי לעדכן דרך עורך הספרייה, ולא דרך אוצריא (שתציע הורדה מלאה)."
+                        : $"יצאה גרסת ספרייה חדשה לאוצריא ({latest}; אצלך {version}). לפני העדכון באוצריא צריך להחזיר את הקובץ למקור, כדי שתוריד רק את ההפרשים.",
+                    _cfg.SelfUpdating ? "עדכן עכשיו" : "החזר למקור", () =>
+                    {
+                        if (_cfg.SelfUpdating) SelfUpdate_Click(null, null);
+                        else RestoreAll_Click(null, null);
+                    });
             else if (_suggestCompact)
                 // אחרי מחיקה הקובץ לא קטן מעצמו; המקום מתפנה רק בדחיסה.
                 ShowBanner("המחיקה הושלמה. כדי שהמקום בדיסק יתפנה בפועל, צריך לדחוס את הקובץ (לוקח כמה דקות).", "פנה מקום עכשיו", () => Compact_Click(null, null));
@@ -502,6 +519,51 @@ namespace SefarimEditor
 
             FillChangesTab(version, root);
             FillBackupState(root);
+        }
+
+        /// <summary>
+        /// גרסת ספרייה חדשה יותר לאוצריא, אם ידועה (מהבדיקה של החלון או של תהליך הרקע), כשהקובץ ערוך.
+        /// בקובץ מקורי אין צורך בהתראה: אוצריא מעדכנת אותו בעצמה.
+        /// </summary>
+        private long? NewerOtzariaRelease(long? version)
+        {
+            if (_choice?.Kind != LibraryKind.Otzaria || _status != LibraryStatus.Edited || version == null) return null;
+            long? latest = null;
+            try { latest = AppSettings.Load().LatestOtzariaRelease; }
+            catch (Exception ex) { Debug.WriteLine(ex); }
+            if (_settings.LatestOtzariaRelease > (latest ?? 0)) latest = _settings.LatestOtzariaRelease;
+            return latest > version ? latest : null;
+        }
+
+        private bool _checkingLatest;
+
+        /// <summary>בדיקת גרסה ברקע כשהחלון נפתח (לפי הגדרת בדיקת העדכונים, ולכל היותר פעם בשעה).</summary>
+        private void CheckLatestInBackground()
+        {
+            try
+            {
+                var relevant = _settings.Libraries.Any(l => l.Kind == LibraryKind.Otzaria && l.Watch && l.LastStatus == LibraryStatus.Edited);
+                if (_checkingLatest || !relevant || !_settings.ShouldCheckUpdates()) return;
+                var onDisk = AppSettings.Load();
+                if (onDisk.LastReleaseCheck > DateTime.Now.AddHours(-1)) return;
+                _checkingLatest = true;
+                var etag = ReleaseChecker.ETagFor(onDisk);
+                Task.Run(() => ReleaseChecker.CheckOtzaria(etag)).ContinueWith(t =>
+                {
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        _checkingLatest = false;
+                        if (t.IsFaulted || ReleaseChecker.Store(_settings, t.Result) == null) return;
+                        SaveSettings();
+                        RefreshStatus();
+                    }));
+                });
+            }
+            catch (Exception ex)
+            {
+                _checkingLatest = false;
+                Debug.WriteLine(ex);
+            }
         }
 
         private void SetPill(string text, string fg, string bg)
@@ -1440,7 +1502,15 @@ namespace SefarimEditor
             {
                 // תהליך הרקע עשוי לעדכן שדות משלו; ממזגים כדי לא לדרוס אותם.
                 var onDisk = AppSettings.Load();
-                _settings.LastReleaseCheck = onDisk.LastReleaseCheck ?? _settings.LastReleaseCheck;
+                // תוצאת בדיקת הגרסה האחרונה: הטרייה מבין השתיים. (קודם נשמר רק זמן הבדיקה, והחלון דרס
+                // את הגרסה שתהליך הרקע מצא – ואז תהליך הרקע לא ידע שיש עדכון ולא הציע אותו.)
+                if (onDisk.LastReleaseCheck > (_settings.LastReleaseCheck ?? DateTime.MinValue))
+                {
+                    _settings.LastReleaseCheck = onDisk.LastReleaseCheck;
+                    _settings.LatestOtzariaRelease = onDisk.LatestOtzariaRelease ?? _settings.LatestOtzariaRelease;
+                    _settings.OtzariaReleasesETag = onDisk.OtzariaReleasesETag;
+                }
+                else if (_settings.LatestOtzariaRelease == null) _settings.LatestOtzariaRelease = onDisk.LatestOtzariaRelease;
                 foreach (var l in _settings.Libraries)
                 {
                     var d = onDisk.Libraries.FirstOrDefault(x => x.Kind == l.Kind && (l.Kind != LibraryKind.Other || LibraryLocator.SamePath(x.DbPath, l.DbPath)));

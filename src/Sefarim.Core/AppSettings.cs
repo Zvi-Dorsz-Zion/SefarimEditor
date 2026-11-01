@@ -94,6 +94,9 @@ namespace Sefarim.Core
         /// <summary>גרסת הספרייה האחרונה שפורסמה לאוצריא, לפי הבדיקה האחרונה.</summary>
         public long? LatestOtzariaRelease { get; set; }
 
+        /// <summary>ה-ETag של התשובה האחרונה מגיטהאב, לבקשה מותנית (לא נספרת במכסה כשאין שינוי).</summary>
+        public string OtzariaReleasesETag { get; set; }
+
         public LibraryKind? LastOpened { get; set; }
 
         /// <summary>כבר שאלנו אם להפעיל את תהליך הרקע (שואלים פעם אחת, אחרי השינוי הראשון).</summary>
