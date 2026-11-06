@@ -243,6 +243,37 @@ namespace Sefarim.Core
             return plan;
         }
 
+        /// <summary>
+        /// כל הטבלאות שמחיקת ספרים או קטגוריות יכולה לשנות, לפי קשרי המחיקה שבמבנה הקובץ. בזמן עדכון אי אפשר להשוות
+        /// אותן לגרסה הרשמית. מחושב מהמבנה ולא מהטבלאות שפעולה נגעה בהן, כי מחיקה שמוחלת שוב אחרי עדכון כמעט
+        /// לא מוצאת מה למחוק (הכול כבר נמחק), ובכל זאת הטבלאות נשארות שונות מהרשמיות.
+        /// </summary>
+        public ISet<string> DeleteReach()
+        {
+            var reach = new HashSet<string>(StringComparer.Ordinal);
+            var queue = new Queue<TableInfo>();
+            foreach (var root in new[] { "book", "category" })
+            {
+                reach.Add(S[root].Name);
+                queue.Enqueue(S[root]);
+            }
+            var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (queue.Count > 0)
+            {
+                var parent = queue.Dequeue();
+                if (!expanded.Add(parent.Name)) continue;
+                foreach (var fk in S.ForeignKeys.Where(f => f.RefTable.Equals(parent.Name, StringComparison.OrdinalIgnoreCase) &&
+                                                            f.OnDelete != DeleteAction.Block && S.Has(f.Table)))
+                {
+                    var child = S[fk.Table];
+                    reach.Add(child.Name);
+                    // SET NULL משנה את השורה אבל לא מוחק אותה, ולכן לא ממשיך הלאה.
+                    if (fk.OnDelete == DeleteAction.Cascade) queue.Enqueue(child);
+                }
+            }
+            return reach;
+        }
+
         // ───────────────────────── ביצוע מחיקה ─────────────────────────
 
         /// <param name="keepBackup">

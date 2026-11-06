@@ -522,6 +522,10 @@ namespace Sefarim.Core
                         touched.UnionWith(op.Tables);
                         reapply.Applied++;
                     }
+                    // מחיקה שכבר בוצעה לפני עדכון קודם נרשמת כמעט בלי טבלאות (אין מה למחוק שוב), אבל מה שנמחק חסר
+                    // בכל הטבלאות הקשורות, ואם העדכון משנה אחת מהן היא לא תהיה זהה לרשמית. לכן לפי מבנה הקובץ.
+                    if (ops.Any(o => o.Intent.Kind == OpIntent.DeleteBooks || o.Intent.Kind == OpIntent.DeleteCategories))
+                        touched.UnionWith(engine.DeleteReach());
                     return touched;
                 },
             });

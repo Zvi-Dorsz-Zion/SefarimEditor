@@ -117,6 +117,13 @@ namespace Sefarim.Tests
                 return 0;
             }
 
+            // --update-now [--via N]: עדכון אמיתי מקצה לקצה של עותק (גילוי, הורדה, החלה, בדיקות); --via עוצר בגרסה N
+            if (args.Contains("--update-now"))
+            {
+                var via = Array.IndexOf(args, "--via");
+                return UpdateNowTest(dbPath, backupRoot, via >= 0 ? int.Parse(args[via + 1]) : (int?)null, progress);
+            }
+
             // --latest: הגרסה האחרונה של ספריית אוצריא לפי ReleaseChecker (כמו בתהליך הרקע)
             if (args.Contains("--latest"))
             {
@@ -308,6 +315,83 @@ namespace Sefarim.Tests
         }
 
         private static void Log(string s) => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {s}");
+
+        // ───────────────────────── עדכון עצמי מקצה לקצה ─────────────────────────
+
+        /// <summary>
+        /// מעדכן עותק של ספרייה ערוכה בעדכונים האמיתיים, ובודק: גרסה, שלמות, שהמחיקות נשארו, ושהטבלאות
+        /// היחידות ששונות מהגרסה הרשמית הן אלה שמחיקה יכולה לשנות. SEFARIM_SETTINGS_DIR ו-SEFARIM_TEST_PROCESS חובה.
+        /// </summary>
+        private static int UpdateNowTest(string dbPath, string backupRoot, int? via, IProgress<string> progress)
+        {
+            if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SEFARIM_SETTINGS_DIR")) ||
+                string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SEFARIM_TEST_PROCESS")))
+            {
+                Log("חובה להגדיר SEFARIM_SETTINGS_DIR ו-SEFARIM_TEST_PROCESS.");
+                return 2;
+            }
+            try
+            {
+                var sw = Stopwatch.StartNew();
+                var settings = new AppSettings();
+                var check = SelfUpdater.Check(settings, dbPath);
+                var plan = check.Plan;
+                if (via.HasValue)
+                {
+                    var (edges, _) = LibraryUpdates.Discover(includePrerelease: false);
+                    plan = LibraryUpdates.Plan(check.LocalVersion, check.LocalSchema, via.Value, edges.Where(e => e.Manifest.ToVersion <= via.Value),
+                        check.OtzariaReadableSchema ?? check.LocalSchema);
+                }
+                Log($"גרסה {check.LocalVersion}, מבנה {check.LocalSchema}, אוצריא {check.OtzariaTag} קוראת עד {check.OtzariaReadableSchema}");
+                Log($"תוכנית: {string.Join(" ← ", plan.Steps.Select(s => $"{s.Manifest.FromVersion}→{s.Manifest.ToVersion}"))} {plan.Reason}");
+                Assert(plan.Steps.Count > 0, "יש מסלול עדכון");
+
+                using (var s = LibrarySession.OpenForWrite(LibraryKind.Otzaria, dbPath, backupRoot))
+                {
+                    var opsBefore = s.Ops();
+                    foreach (var op in opsBefore) Log($"  פעולה #{op.Id} {op.State}: {op.Intent.Summary}; טבלאות: {string.Join(",", op.Tables)}");
+                    var deletedCats = opsBefore.SelectMany(o => o.Intent.Categories).ToList();
+
+                    SelfUpdateOutcome outcome = null;
+                    Timed("עדכון", () => outcome = SelfUpdater.Run(s, plan, progress));
+                    var last = plan.Steps.Last().Manifest;
+                    Assert(s.Version == last.ToVersion && outcome.ToVersion == last.ToVersion, $"גרסה {s.Version}");
+                    Log($"  ספרים שהעדכון נגע בהם: {outcome.BooksTouched.Count:N0}, שורות יתומות שנוקו: {outcome.OrphansRemoved:N0}, הערות: {outcome.Notes.Count}");
+                    foreach (var n in outcome.Notes) Log("    " + n);
+
+                    var cat = s.Db.LoadCatalog();
+                    foreach (var c in deletedCats)
+                    {
+                        Assert(!cat.Categories.ContainsKey(c.Id), $"הקטגוריה \"{c.Path}\" לא בקובץ");
+                        Assert(s.Db.Scalar("SELECT 1 FROM category_closure WHERE ancestorId=$c OR descendantId=$c LIMIT 1", ("$c", c.Id)) == null,
+                            $"אין שורות של \"{c.Path}\" ב-category_closure");
+                    }
+                    Assert(cat.Books.Values.All(b => b.Category != null), "אין ספרים בלי קטגוריה");
+                    Assert(cat.Categories.Values.All(c => c.ParentId == null || c.Parent != null), "אין קטגוריות בלי אב");
+                    var opsAfter = s.Ops();
+                    Assert(opsAfter.Count == opsBefore.Count && opsAfter.All(o => o.State == OpState.Permanent || o.State == OpState.Applied), "הפעולות נשמרו");
+
+                    var fk = Convert.ToInt64(s.Db.Scalar("SELECT count(*) FROM pragma_foreign_key_check"));
+                    Assert(fk == 0, $"אין הפרות קשרים ({fk})");
+                    Assert(s.Db.Scalar("PRAGMA quick_check") as string == "ok", "quick_check תקין");
+
+                    // ההשוואה החזקה: כל הקובץ מול החתימה הרשמית, טבלה אחר טבלה.
+                    var report = Timed2("חתימה מלאה של הקובץ", () => LogicalHasher.Compute(s.Db, last.ToSchemaVersion));
+                    var differ = last.ToTableContentHashes.Where(kv => !report.TableHashes.TryGetValue(kv.Key, out var h) || h != kv.Value).Select(kv => kv.Key).ToList();
+                    Log($"  זהות לרשמי: {last.ToTableContentHashes.Count - differ.Count} טבלאות; שונות: {string.Join(", ", differ)}");
+                    var reach = s.Engine.DeleteReach();
+                    var outside = differ.Where(t => !reach.Contains(t) && t != "sqlite_stat1").ToList();
+                    Assert(outside.Count == 0, "כל הטבלאות השונות הן כאלה שמחיקה יכולה לשנות" + (outside.Count > 0 ? ": " + string.Join(", ", outside) : ""));
+                }
+                Log($"הכול עבר. זמן כולל: {sw.Elapsed.TotalMinutes:N1} דקות");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Log("נכשל: " + ex.GetType().Name + ": " + ex.Message);
+                return 1;
+            }
+        }
 
         // ───────────────────────── רכיב החיפוש (זית) ─────────────────────────
 
